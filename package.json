@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "build": "echo \"Rien à compiler : le webmail est servi tel quel depuis public/.\"",
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "db:local": "wrangler d1 execute valentin-mail --local --file=schema.sql",
