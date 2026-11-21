@@ -1,0 +1,35 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "valentin-mail",
+  "main": "src/worker.js",
+  "compatibility_date": "2026-11-01",
+
+  // Le webmail (page, styles, script) est servi tel quel depuis ./public.
+  "assets": { "directory": "./public", "binding": "ASSETS" },
+
+  // Index des messages.
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "valentin-mail",
+      "database_id": "451c31ce-6e38-4c5f-9616-7479729a8ac9"
+    }
+  ],
+
+  // Messages bruts (.eml), pièces jointes comprises.
+  "r2_buckets": [{ "binding": "MAIL_BUCKET", "bucket_name": "valentin-mail-raw" }],
+
+  // Adresse d'expédition, telle que tes correspondants la verront.
+  "vars": { "MAIL_FROM": "Valentin <valentin@valentinlarge.com>" },
+
+  // La règle de réception (quelles adresses arrivent dans la boîte) se règle dans le
+  // tableau de bord Cloudflare : Email Routing > Routing Rules > Catch-all > Send to a Worker.
+  // Avec Wrangler sur un ordinateur, on peut la gérer ici à la place :
+  // "addresses": ["*@valentinlarge.com"],
+
+  // Pour ouvrir le webmail sur ton domaine plutôt que sur l'adresse *.workers.dev,
+  // retire les deux barres devant la ligne suivante :
+  // "routes": [{ "pattern": "courrier.valentinlarge.com", "custom_domain": true }],
+
+  "observability": { "enabled": true }
+}

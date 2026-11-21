@@ -1,0 +1,4 @@
+# Copie ce fichier en .dev.vars pour tester en local (npm run dev).
+# Ces valeurs ne servent qu'en local : en production, on utilise `wrangler secret put`.
+APP_PASSWORD=un-mot-de-passe-de-test
+RESEND_API_KEY=re_xxxxxxxx

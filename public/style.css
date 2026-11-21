@@ -1,0 +1,803 @@
+@font-face {
+  font-family: "Bricolage Grotesque";
+  src: url("/fonts/bricolage-grotesque.woff2") format("woff2");
+  font-weight: 200 800;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  --paper: #f1f4f9;
+  --surface: #ffffff;
+  --ink: #17223b;
+  --muted: #5a6880;
+  --line: #d8dfea;
+  --blue: #1d57b8;
+  --blue-wash: #e4ecfa;
+  --red: #cf2f3c;
+  --font: "Bricolage Grotesque", "Segoe UI", system-ui, -apple-system, sans-serif;
+  /* Le liseré « par avion » : seule touche décorative de l'interface. */
+  --stripe: repeating-linear-gradient(
+    -45deg,
+    var(--red) 0 12px,
+    #fff 12px 24px,
+    var(--blue) 24px 36px,
+    #fff 36px 48px
+  );
+  --stripe-height: 6px;
+  color-scheme: light;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font);
+  font-size: 1rem;
+  line-height: 1.45;
+}
+
+h1,
+h2,
+p,
+ul,
+dl,
+dd {
+  margin: 0;
+}
+
+ul {
+  padding: 0;
+  list-style: none;
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+}
+
+.airmail {
+  position: fixed;
+  inset: 0 0 auto 0;
+  height: var(--stripe-height);
+  background: var(--stripe);
+  z-index: 20;
+}
+
+#app {
+  padding-top: var(--stripe-height);
+  min-height: 100dvh;
+}
+
+.fatal {
+  max-width: 34rem;
+  margin: 20vh auto 0;
+  padding: 0 1.25rem;
+  font-size: 1.125rem;
+}
+
+/* ------------------------------------------------------------- boutons */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 2.5rem;
+  padding: 0.5rem 0.9rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--ink);
+  font-weight: 550;
+  line-height: 1.2;
+  text-decoration: none;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.btn:hover {
+  border-color: var(--muted);
+}
+
+.btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.btn.btn-primary {
+  background: var(--blue);
+  border-color: var(--blue);
+  color: #fff;
+  font-weight: 650;
+}
+
+.btn-primary:hover {
+  background: #17489a;
+  border-color: #17489a;
+}
+
+.btn-quiet {
+  background: transparent;
+  border-color: transparent;
+}
+
+.btn-quiet:hover {
+  background: rgba(23, 34, 59, 0.07);
+  border-color: transparent;
+}
+
+.btn.btn-danger {
+  color: var(--red);
+}
+
+.btn.btn-danger.is-armed {
+  background: var(--red);
+  border-color: var(--red);
+  color: #fff;
+}
+
+/* ----------------------------------------------------------- connexion */
+
+.login {
+  display: grid;
+  place-items: center;
+  min-height: calc(100dvh - var(--stripe-height));
+  padding: 1.25rem;
+}
+
+/* Une enveloppe : le liseré fait le tour, la carte blanche est posée dessus. */
+.login-envelope {
+  width: min(100%, 25rem);
+  padding: 9px;
+  background: var(--stripe);
+  border-radius: 6px;
+  box-shadow: 0 18px 40px -22px rgba(23, 34, 59, 0.45);
+}
+
+.login-card {
+  padding: 2rem 1.5rem 1.75rem;
+  background: var(--surface);
+  border-radius: 2px;
+}
+
+.login-card h1 {
+  font-size: 2.25rem;
+  font-weight: 800;
+  letter-spacing: -0.035em;
+  line-height: 1;
+}
+
+.login-card p {
+  margin-top: 0.6rem;
+  color: var(--muted);
+}
+
+.login-form {
+  display: grid;
+  gap: 0.75rem;
+  margin-top: 1.5rem;
+}
+
+.field {
+  display: grid;
+  gap: 0.3rem;
+}
+
+.field label,
+.field .label {
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+.input {
+  width: 100%;
+  min-height: 2.75rem;
+  padding: 0.55rem 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.input:hover {
+  border-color: var(--muted);
+}
+
+textarea.input {
+  min-height: 12rem;
+  resize: vertical;
+  line-height: 1.5;
+}
+
+.form-error {
+  color: var(--red);
+  font-weight: 550;
+}
+
+.form-error:empty {
+  display: none;
+}
+
+/* ---------------------------------------------------------- en-tête */
+
+.topbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas:
+    "name actions"
+    "address address";
+  align-items: center;
+  column-gap: 0.75rem;
+  padding: 0.7rem 1rem 0.6rem;
+}
+
+.brand-name {
+  grid-area: name;
+  font-size: 1.5rem;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  line-height: 1.1;
+}
+
+.brand-address {
+  grid-area: address;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 0.875rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.topbar-actions {
+  grid-area: actions;
+  display: flex;
+  gap: 0.25rem;
+}
+
+/* --------------------------------------------------------- dossiers */
+
+.folders {
+  display: flex;
+  gap: 0.25rem;
+  padding: 0 0.5rem;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--line);
+  scrollbar-width: none;
+}
+
+.folder {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.65rem 0.6rem 0.55rem;
+  border: 0;
+  border-bottom: 3px solid transparent;
+  background: none;
+  color: var(--muted);
+  font-weight: 550;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.folder[aria-current="page"] {
+  border-bottom-color: var(--ink);
+  color: var(--ink);
+  font-weight: 700;
+}
+
+.folder-count {
+  min-width: 1.4rem;
+  padding: 0.05rem 0.4rem;
+  border-radius: 999px;
+  background: var(--blue);
+  color: #fff;
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-align: center;
+}
+
+.folder-count:empty {
+  display: none;
+}
+
+/* ------------------------------------------------------------ liste */
+
+.list-tools {
+  display: grid;
+  gap: 0.6rem;
+  padding: 0.85rem 1rem 0.6rem;
+}
+
+.list-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.list-head h1 {
+  font-size: 1.25rem;
+  font-weight: 750;
+  letter-spacing: -0.02em;
+}
+
+.list-head-actions {
+  display: flex;
+  gap: 0.25rem;
+}
+
+.message-list {
+  border-top: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.1rem 0.75rem;
+  padding: 0.7rem 1rem 0.75rem 1.15rem;
+  border-bottom: 1px solid var(--line);
+  color: inherit;
+  text-decoration: none;
+}
+
+.row:hover {
+  background: #f7f9fc;
+}
+
+.row-who,
+.row-subject {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.row-who {
+  font-weight: 500;
+}
+
+.row-date {
+  color: var(--muted);
+  font-size: 0.8125rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.row-subject {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-size: 0.9375rem;
+}
+
+/* Non lu : filet bleu à gauche, expéditeur et objet en gras. */
+.row.is-unread {
+  box-shadow: inset 4px 0 0 var(--blue);
+}
+
+.row.is-unread .row-who {
+  font-weight: 750;
+}
+
+.row.is-unread .row-subject {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.row.is-selected,
+.row.is-selected:hover {
+  background: var(--blue-wash);
+}
+
+.list-foot {
+  padding: 1.25rem 1rem 2rem;
+  color: var(--muted);
+  text-align: center;
+}
+
+.list-foot .btn {
+  margin-top: 0.25rem;
+}
+
+.list-foot .form-error {
+  margin-bottom: 0.5rem;
+}
+
+/* ----------------------------------------------------------- lecture */
+
+.reader-pane {
+  display: none;
+}
+
+.layout[data-view="reader"] .folders,
+.layout[data-view="reader"] .list-pane {
+  display: none;
+}
+
+.layout[data-view="reader"] .reader-pane {
+  display: block;
+}
+
+.reader-bar {
+  position: sticky;
+  top: var(--stripe-height);
+  z-index: 5;
+  display: grid;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem 0.6rem;
+  background: var(--paper);
+  border-bottom: 1px solid var(--line);
+}
+
+.reader-bar-main {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.reader-bar .spacer {
+  flex: 1 1 auto;
+}
+
+/* Petit écran : les actions secondaires se partagent la largeur. */
+.reader-bar-more {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
+  gap: 0.4rem;
+}
+
+.reader-bar-more .btn {
+  padding-inline: 0.25rem;
+  font-size: 0.875rem;
+  white-space: normal;
+}
+
+.reader-note {
+  padding: 3rem 1.25rem;
+  color: var(--muted);
+  text-align: center;
+}
+
+.letter {
+  background: var(--surface);
+}
+
+.letter-head {
+  padding: 1.25rem 1rem 1rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.letter-subject {
+  font-size: 1.5rem;
+  font-weight: 750;
+  letter-spacing: -0.025em;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+
+.letter-meta {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0.15rem 0.75rem;
+  margin-top: 0.85rem;
+  font-size: 0.9375rem;
+}
+
+.letter-meta dt {
+  color: var(--muted);
+}
+
+.letter-meta dd {
+  overflow-wrap: anywhere;
+}
+
+.letter-meta .who-name {
+  font-weight: 650;
+}
+
+.letter-meta .who-address {
+  color: var(--muted);
+}
+
+.images-notice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.6rem 1rem;
+  background: var(--blue-wash);
+  font-size: 0.9375rem;
+}
+
+.letter-frame {
+  display: block;
+  width: 100%;
+  min-height: 12rem;
+  border: 0;
+  background: #fff;
+}
+
+.letter-plain {
+  margin: 0;
+  padding: 1.25rem 1rem;
+  font-family: var(--font);
+  font-size: 1rem;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.attachments {
+  padding: 1rem;
+  border-top: 1px solid var(--line);
+}
+
+.attachments h3 {
+  margin: 0 0 0.5rem;
+  font-size: 0.9375rem;
+  font-weight: 650;
+}
+
+.attachments ul {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.attachment {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  max-width: 100%;
+  padding: 0.45rem 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--blue);
+  font-weight: 600;
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+
+.attachment:hover {
+  border-color: var(--blue);
+}
+
+.attachment small {
+  color: var(--muted);
+  font-weight: 400;
+  white-space: nowrap;
+}
+
+/* ---------------------------------------------------------- rédaction */
+
+.compose {
+  width: 100%;
+  max-width: none;
+  height: 100%;
+  max-height: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: var(--surface);
+  color: var(--ink);
+  overflow-y: auto;
+}
+
+.compose::backdrop {
+  background: rgba(23, 34, 59, 0.45);
+}
+
+.compose::before {
+  content: "";
+  display: block;
+  height: 9px;
+  background: var(--stripe);
+}
+
+.compose-form {
+  display: grid;
+  gap: 0.8rem;
+  padding: 1rem;
+}
+
+.compose-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.compose-head h2 {
+  font-size: 1.375rem;
+  font-weight: 750;
+  letter-spacing: -0.02em;
+}
+
+.compose-from {
+  color: var(--muted);
+  font-size: 0.9375rem;
+}
+
+.compose-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+/* -------------------------------------------------------------- toast */
+
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: max(1.25rem, env(safe-area-inset-bottom));
+  z-index: 40;
+  max-width: calc(100vw - 2rem);
+  padding: 0.65rem 1rem;
+  border-radius: 8px;
+  background: var(--ink);
+  color: #fff;
+  font-weight: 550;
+  transform: translateX(-50%);
+}
+
+.toast[hidden] {
+  display: none;
+}
+
+/* ------------------------------------------------------- grand écran */
+
+@media (min-width: 60rem) {
+  .topbar {
+    grid-template-areas:
+      "name actions"
+      "address actions";
+    padding: 0.85rem 1.5rem;
+  }
+
+  .shell {
+    display: flex;
+    flex-direction: column;
+    height: calc(100dvh - var(--stripe-height));
+  }
+
+  .layout {
+    display: grid;
+    grid-template-columns: 13.5rem 25rem minmax(0, 1fr);
+    flex: 1 1 auto;
+    min-height: 0;
+    border-top: 1px solid var(--line);
+  }
+
+  .layout[data-view="reader"] .folders,
+  .layout[data-view] .folders {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    padding: 1rem 0.75rem;
+    overflow: visible;
+    border-bottom: 0;
+  }
+
+  .folder {
+    justify-content: space-between;
+    padding: 0.55rem 0.75rem;
+    border-bottom: 0;
+    border-radius: 8px;
+  }
+
+  .folder[aria-current="page"] {
+    background: var(--ink);
+    color: #fff;
+  }
+
+  .folder[aria-current="page"] .folder-count {
+    background: #fff;
+    color: var(--ink);
+  }
+
+  .layout[data-view="reader"] .list-pane,
+  .layout[data-view] .list-pane {
+    display: block;
+    overflow-y: auto;
+    border-inline: 1px solid var(--line);
+    background: var(--surface);
+  }
+
+  .list-tools {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    background: var(--surface);
+  }
+
+  .layout[data-view] .reader-pane {
+    display: block;
+    overflow-y: auto;
+  }
+
+  .reader-bar {
+    top: 0;
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    padding: 0.6rem 1.5rem;
+  }
+
+  .reader-bar-main .back,
+  .reader-bar-main .spacer {
+    display: none;
+  }
+
+  .reader-bar-more {
+    display: flex;
+  }
+
+  .reader-bar-more .btn {
+    padding-inline: 0.9rem;
+    font-size: 1rem;
+    white-space: nowrap;
+  }
+
+  .letter {
+    max-width: 52rem;
+    margin: 1.25rem 1.5rem 2.5rem;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    overflow: hidden;
+  }
+
+  .letter-head {
+    padding: 1.5rem 1.5rem 1.15rem;
+  }
+
+  .letter-subject {
+    font-size: 1.75rem;
+  }
+
+  .images-notice,
+  .attachments {
+    padding-inline: 1.5rem;
+  }
+
+  .letter-plain {
+    padding: 1.5rem;
+  }
+
+  .compose {
+    width: min(42rem, calc(100vw - 3rem));
+    height: fit-content;
+    max-height: calc(100dvh - 3rem);
+    margin: auto;
+    border-radius: 6px;
+    box-shadow: 0 30px 70px -30px rgba(23, 34, 59, 0.6);
+  }
+
+  .compose-form {
+    padding: 1.25rem 1.5rem 1.5rem;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .btn,
+  .row,
+  .input {
+    transition: background-color 0.12s ease, border-color 0.12s ease;
+  }
+}

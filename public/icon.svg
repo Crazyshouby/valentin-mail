@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <pattern id="s" width="96" height="96" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+      <rect width="96" height="96" fill="#fff"/>
+      <rect width="24" height="96" fill="#cf2f3c"/>
+      <rect x="48" width="24" height="96" fill="#1d57b8"/>
+    </pattern>
+  </defs>
+  <rect width="512" height="512" fill="url(#s)"/>
+  <rect x="52" y="52" width="408" height="408" rx="28" fill="#fff"/>
+  <path d="M132 184h248v160H132z" fill="none" stroke="#17223b" stroke-width="26" stroke-linejoin="round"/>
+  <path d="M132 184l124 96 124-96" fill="none" stroke="#17223b" stroke-width="26" stroke-linejoin="round" stroke-linecap="round"/>
+</svg>
