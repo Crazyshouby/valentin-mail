@@ -22,9 +22,10 @@
   // Adresse d'expédition, telle que tes correspondants la verront.
   "vars": { "MAIL_FROM": "Valentin <valentin@valentinlarge.com>" },
 
-  // Règle « Catch-all » d'Email Routing : toute adresse du domaine arrive dans la boîte.
-  // Le serveur liste ensuite ces adresses, et l'appli permet de couper celles qui attirent le spam.
-  "addresses": ["*@valentinlarge.com"],
+  // Quelles adresses arrivent dans la boîte : cela se règle dans le tableau de bord Cloudflare
+  // (Email Routing > Routing Rules), par une règle par adresse ou par la règle « Catch-all »
+  // avec l'action « Send to a Worker ». La déclarer ici ("addresses": ["*@valentinlarge.com"])
+  // fait échouer le déploiement automatique : il n'a pas le droit de toucher à ces règles.
 
   // Pour ouvrir le webmail sur ton domaine plutôt que sur l'adresse *.workers.dev,
   // retire les deux barres devant la ligne suivante :
