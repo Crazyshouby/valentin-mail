@@ -11,11 +11,27 @@ CREATE TABLE IF NOT EXISTS messages (
   date        INTEGER NOT NULL,                -- millisecondes (réception ou envoi)
   size        INTEGER NOT NULL DEFAULT 0,
   is_read     INTEGER NOT NULL DEFAULT 0,
-  r2_key      TEXT NOT NULL
+  r2_key      TEXT NOT NULL,
+  thread_id   TEXT                             -- conversation : identifiant de son premier message
 );
+
+-- Base créée avant l'arrivée des conversations : ajouter la colonne à la main, une fois :
+--   ALTER TABLE messages ADD COLUMN thread_id TEXT;
+--   UPDATE messages SET thread_id = id WHERE thread_id IS NULL;
 
 CREATE INDEX IF NOT EXISTS idx_messages_folder_date ON messages (folder, date DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_unread ON messages (folder, is_read);
+CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages (thread_id);
+
+CREATE TABLE IF NOT EXISTS drafts (
+  id          TEXT PRIMARY KEY,
+  to_addr     TEXT NOT NULL DEFAULT '',
+  cc          TEXT NOT NULL DEFAULT '',
+  subject     TEXT NOT NULL DEFAULT '',
+  text        TEXT NOT NULL DEFAULT '',
+  reply_to_id TEXT,
+  updated     INTEGER NOT NULL
+);
 
 -- Échecs de connexion, pour bloquer les essais de mot de passe en rafale.
 CREATE TABLE IF NOT EXISTS login_failures (

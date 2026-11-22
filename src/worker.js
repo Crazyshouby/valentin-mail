@@ -18,6 +18,8 @@ const MAX_ATTACHMENTS = 10;
 const MAX_ATTACHMENTS_BYTES = 25 * 1024 * 1024; // total par message
 const ATTACHMENT_LINK_MS = 6 * 3600 * 1000;
 const ORPHAN_UPLOAD_MS = 24 * 3600 * 1000;
+const THREAD_WINDOW_MS = 60 * 24 * 3600 * 1000; // au-delà, un même objet ouvre une nouvelle conversation
+const MAX_BATCH = 100;
 
 export default {
   async email(message, env) {
@@ -50,11 +52,19 @@ async function receive(message, env) {
   if (!from.address) from.address = (message.from || "").toLowerCase();
   const subject = decodeMimeWords(headers.get("subject") || "").trim();
 
+  // Une réponse rejoint la conversation du message auquel elle répond.
+  let thread = null;
+  try {
+    thread = await findThread(env, { refs: referencedIds(headers), subject, correspondent: from.address });
+  } catch (err) {
+    console.error("Recherche de la conversation impossible :", err);
+  }
+
   try {
     await env.DB.prepare(
       `INSERT INTO messages
-         (id, folder, direction, from_addr, from_name, to_addr, subject, message_id, date, size, is_read, r2_key)
-       VALUES (?1, 'inbox', 'in', ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, ?9)`
+         (id, folder, direction, from_addr, from_name, to_addr, subject, message_id, date, size, is_read, r2_key, thread_id)
+       VALUES (?1, 'inbox', 'in', ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, ?9, ?10)`
     )
       .bind(
         id,
@@ -65,7 +75,8 @@ async function receive(message, env) {
         (headers.get("message-id") || "").trim().slice(0, 500) || null,
         Date.now(),
         raw.byteLength,
-        key
+        key,
+        thread || id
       )
       .run();
   } catch (err) {
@@ -130,6 +141,17 @@ async function route(request, env) {
   if (path === "/api/messages" && method === "GET") return listMessages(url, env);
   if (path === "/api/send" && method === "POST") return sendMessage(request, url, env);
   if (path === "/api/trash/empty" && method === "POST") return emptyTrash(env);
+  if (path === "/api/messages/batch" && method === "POST") return batchMessages(request, env);
+  if (path === "/api/drafts" && method === "GET") return listDrafts(env);
+
+  const draft = path.match(/^\/api\/drafts\/([0-9a-f-]{36})$/);
+  if (draft) {
+    if (method === "PUT") return saveDraft(draft[1], request, env);
+    if (method === "DELETE") return deleteDraft(draft[1], env);
+  }
+
+  const thread = path.match(/^\/api\/threads\/([0-9a-f-]{36})$/);
+  if (thread && method === "GET") return listThread(thread[1], env);
 
   const upload = path.match(/^\/api\/uploads\/([0-9a-f-]{36})$/);
   if (upload) {
@@ -266,7 +288,63 @@ function readCookie(request, name) {
 // ----------------------------------------------------------------- messages
 
 const LIST_COLUMNS =
-  "id, folder, direction, from_addr, from_name, to_addr, subject, message_id, date, size, is_read";
+  "id, folder, direction, from_addr, from_name, to_addr, subject, message_id, date, size, is_read, thread_id";
+
+// Nombre de messages de la même conversation, tous dossiers confondus sauf la corbeille.
+const THREAD_COUNT =
+  "(SELECT COUNT(*) FROM messages t WHERE t.thread_id = messages.thread_id AND t.folder != 'trash') AS thread_count";
+
+// Identifiants de message cités par un mail : celui auquel il répond, et le fil qui précède.
+function referencedIds(headers) {
+  const all = `${headers.get("in-reply-to") || ""} ${headers.get("references") || ""}`;
+  return [...new Set(all.match(/<[^<>\s]+>/g) || [])].slice(-30);
+}
+
+const REPLY_PREFIX = /^\s*(re|ré|rép|aw|tr|fwd?|wg)\s*(\[\d+\])?\s*:\s*/i;
+
+// L'objet sans ses « Re: » et « Fwd: » accumulés, pour comparer deux messages d'un même échange.
+function subjectKey(subject) {
+  let s = String(subject || "");
+  for (let i = 0; i < 10 && REPLY_PREFIX.test(s); i++) s = s.replace(REPLY_PREFIX, "");
+  return s.replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+async function findThread(env, { refs, subject, correspondent }) {
+  if (refs.length) {
+    const row = await env.DB.prepare(
+      `SELECT COALESCE(thread_id, id) AS thread FROM messages
+       WHERE message_id IN (${refs.map(() => "?").join(",")}) ORDER BY date DESC LIMIT 1`
+    )
+      .bind(...refs)
+      .first();
+    if (row) return row.thread;
+  }
+
+  // Une réponse à l'un de nos envois cite un identifiant attribué par le service
+  // d'envoi, que ce serveur ne connaît pas. On se rabat alors sur « même
+  // correspondant, même objet, récemment » — seulement pour ce qui est une réponse.
+  const key = subjectKey(subject);
+  if (!key || !correspondent || !(refs.length || REPLY_PREFIX.test(subject))) return null;
+  const like = "%" + correspondent.replace(/[\\%_]/g, "\\$&") + "%";
+  const rows = await env.DB.prepare(
+    `SELECT COALESCE(thread_id, id) AS thread, subject FROM messages
+     WHERE date > ?1 AND folder != 'trash' AND (from_addr = ?2 OR to_addr LIKE ?3 ESCAPE '\\')
+     ORDER BY date DESC LIMIT 40`
+  )
+    .bind(Date.now() - THREAD_WINDOW_MS, correspondent, like)
+    .all();
+  const hit = (rows.results || []).find((r) => subjectKey(r.subject) === key);
+  return hit ? hit.thread : null;
+}
+
+async function listThread(id, env) {
+  const rows = await env.DB.prepare(
+    `SELECT ${LIST_COLUMNS} FROM messages WHERE thread_id = ?1 AND folder != 'trash' ORDER BY date ASC LIMIT 200`
+  )
+    .bind(id)
+    .all();
+  return json({ messages: rows.results || [] });
+}
 
 async function listMessages(url, env) {
   const folder = url.searchParams.get("folder") || "inbox";
@@ -296,7 +374,7 @@ async function listMessages(url, env) {
 
   const [list, unread] = await env.DB.batch([
     env.DB.prepare(
-      `SELECT ${LIST_COLUMNS} FROM messages WHERE ${where.join(" AND ")} ORDER BY date DESC LIMIT ${PAGE_SIZE + 1}`
+      `SELECT ${LIST_COLUMNS}, ${THREAD_COUNT} FROM messages WHERE ${where.join(" AND ")} ORDER BY date DESC LIMIT ${PAGE_SIZE + 1}`
     ).bind(...params),
     env.DB.prepare("SELECT COUNT(*) AS n FROM messages WHERE folder = 'inbox' AND is_read = 0"),
   ]);
@@ -382,6 +460,152 @@ async function deleteMessage(id, env) {
   return json({ ok: true, deleted: true });
 }
 
+// Une même action sur plusieurs messages à la fois : lu ou non lu, changement de dossier, suppression.
+async function batchMessages(request, env) {
+  const body = await readJson(request);
+  if (!body || !Array.isArray(body.ids)) return json({ error: "Requête illisible." }, 400);
+  const ids = [...new Set(body.ids.map(String))];
+  if (!ids.length) return json({ ok: true, changed: 0, deleted: 0 });
+  if (ids.length > MAX_BATCH) return json({ error: `Pas plus de ${MAX_BATCH} messages à la fois.` }, 400);
+  if (ids.some((id) => !/^[0-9a-f-]{36}$/.test(id))) return json({ error: "Message invalide." }, 400);
+  const marks = ids.map(() => "?").join(",");
+
+  if (body.delete === true) {
+    // Comme pour un seul message : d'abord la corbeille, puis la suppression pour de bon.
+    const rows = await env.DB.prepare(`SELECT id, folder, r2_key FROM messages WHERE id IN (${marks})`).bind(...ids).all();
+    const gone = (rows.results || []).filter((r) => r.folder === "trash");
+    const toTrash = (rows.results || []).filter((r) => r.folder !== "trash").map((r) => r.id);
+    if (toTrash.length) {
+      await env.DB.prepare(`UPDATE messages SET folder = 'trash' WHERE id IN (${toTrash.map(() => "?").join(",")})`)
+        .bind(...toTrash)
+        .run();
+    }
+    if (gone.length) {
+      const goneIds = gone.map((r) => r.id);
+      const goneMarks = goneIds.map(() => "?").join(",");
+      const files = await env.DB.prepare(`SELECT id FROM uploads WHERE message_id IN (${goneMarks})`).bind(...goneIds).all();
+      await env.MAIL_BUCKET.delete([...gone.map((r) => r.r2_key), ...(files.results || []).map((f) => `uploads/${f.id}`)]);
+      await env.DB.batch([
+        env.DB.prepare(`DELETE FROM uploads WHERE message_id IN (${goneMarks})`).bind(...goneIds),
+        env.DB.prepare(`DELETE FROM messages WHERE id IN (${goneMarks})`).bind(...goneIds),
+      ]);
+    }
+    return json({ ok: true, changed: toTrash.length, deleted: gone.length });
+  }
+
+  const sets = [];
+  const params = [];
+  if (typeof body.is_read === "boolean") {
+    sets.push("is_read = ?");
+    params.push(body.is_read ? 1 : 0);
+  }
+  if (typeof body.folder === "string") {
+    if (!FOLDERS.includes(body.folder)) return json({ error: "Dossier inconnu." }, 400);
+    sets.push("folder = ?");
+    params.push(body.folder);
+  }
+  if (!sets.length) return json({ error: "Rien à modifier." }, 400);
+  const result = await env.DB.prepare(`UPDATE messages SET ${sets.join(", ")} WHERE id IN (${marks})`)
+    .bind(...params, ...ids)
+    .run();
+  return json({ ok: true, changed: result.meta ? result.meta.changes : 0, deleted: 0 });
+}
+
+// --------------------------------------------------------------- brouillons
+
+// Les fichiers d'un brouillon portent cette marque à la place d'un identifiant de message.
+const draftTag = (id) => `draft:${id}`;
+
+async function listDrafts(env) {
+  const rows = await env.DB.prepare(
+    "SELECT id, to_addr, cc, subject, text, reply_to_id, updated FROM drafts ORDER BY updated DESC LIMIT 200"
+  ).all();
+  const drafts = rows.results || [];
+  const files = drafts.length
+    ? await env.DB.prepare(
+        `SELECT id, message_id, name, type, size FROM uploads WHERE message_id IN (${drafts.map(() => "?").join(",")}) ORDER BY rowid`
+      )
+        .bind(...drafts.map((d) => draftTag(d.id)))
+        .all()
+    : { results: [] };
+  return json({
+    drafts: drafts.map((d) => ({
+      id: d.id,
+      to: d.to_addr,
+      cc: d.cc,
+      subject: d.subject,
+      text: d.text,
+      reply_to_id: d.reply_to_id,
+      updated: d.updated,
+      attachments: (files.results || [])
+        .filter((f) => f.message_id === draftTag(d.id))
+        .map((f) => ({ id: f.id, name: f.name, type: f.type, size: f.size })),
+    })),
+  });
+}
+
+async function saveDraft(id, request, env) {
+  const body = await readJson(request);
+  if (!body) return json({ error: "Requête illisible." }, 400);
+  const text = String(body.text || "");
+  if (text.length > 500000) return json({ error: "Le message est trop long." }, 400);
+  const replyTo = typeof body.reply_to_id === "string" && /^[0-9a-f-]{36}$/.test(body.reply_to_id) ? body.reply_to_id : null;
+  const fileIds = Array.isArray(body.attachment_ids) ? [...new Set(body.attachment_ids.map(String))] : [];
+  if (fileIds.length > MAX_ATTACHMENTS) {
+    return json({ error: `Pas plus de ${MAX_ATTACHMENTS} pièces jointes par message.` }, 400);
+  }
+  if (fileIds.some((f) => !/^[0-9a-f-]{36}$/.test(f))) return json({ error: "Pièce jointe invalide." }, 400);
+
+  const tag = draftTag(id);
+  if (fileIds.length) {
+    const found = await env.DB.prepare(
+      `SELECT id FROM uploads WHERE (message_id IS NULL OR message_id = ?) AND id IN (${fileIds.map(() => "?").join(",")})`
+    )
+      .bind(tag, ...fileIds)
+      .all();
+    if ((found.results || []).length !== fileIds.length) {
+      return json({ error: "Une pièce jointe est introuvable sur le serveur. Rajoute-la, puis enregistre à nouveau." }, 400);
+    }
+  }
+
+  const now = Date.now();
+  const statements = [
+    env.DB.prepare(
+      `INSERT INTO drafts (id, to_addr, cc, subject, text, reply_to_id, updated) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+       ON CONFLICT(id) DO UPDATE SET to_addr = ?2, cc = ?3, subject = ?4, text = ?5, reply_to_id = ?6, updated = ?7`
+    ).bind(
+      id,
+      String(body.to || "").slice(0, 2000),
+      String(body.cc || "").slice(0, 2000),
+      String(body.subject || "").replace(/[\r\n]+/g, " ").slice(0, 500),
+      text,
+      replyTo,
+      now
+    ),
+    // Un fichier retiré du brouillon redevient orphelin : le ménage habituel l'effacera.
+    env.DB.prepare("UPDATE uploads SET message_id = NULL WHERE message_id = ?1").bind(tag),
+  ];
+  if (fileIds.length) {
+    statements.push(
+      env.DB.prepare(`UPDATE uploads SET message_id = ? WHERE id IN (${fileIds.map(() => "?").join(",")})`).bind(tag, ...fileIds)
+    );
+  }
+  await env.DB.batch(statements);
+  return json({ ok: true, updated: now });
+}
+
+async function deleteDraft(id, env) {
+  const tag = draftTag(id);
+  const files = await env.DB.prepare("SELECT id FROM uploads WHERE message_id = ?1").bind(tag).all();
+  const keys = (files.results || []).map((f) => `uploads/${f.id}`);
+  if (keys.length) await env.MAIL_BUCKET.delete(keys);
+  await env.DB.batch([
+    env.DB.prepare("DELETE FROM uploads WHERE message_id = ?1").bind(tag),
+    env.DB.prepare("DELETE FROM drafts WHERE id = ?1").bind(id),
+  ]);
+  return json({ ok: true });
+}
+
 async function emptyTrash(env) {
   let removed = 0;
   // Par lots, pour rester dans les limites d'une seule exécution.
@@ -437,13 +661,16 @@ async function sendMessage(request, url, env) {
   if (fileIds.length > MAX_ATTACHMENTS) {
     return json({ error: `Pas plus de ${MAX_ATTACHMENTS} pièces jointes par message.` }, 400);
   }
+  // Un brouillon qu'on envoie apporte les fichiers qui lui étaient rattachés.
+  const draftId = typeof body.draft_id === "string" && /^[0-9a-f-]{36}$/.test(body.draft_id) ? body.draft_id : null;
   let files = [];
   if (fileIds.length) {
     if (fileIds.some((id) => !/^[0-9a-f-]{36}$/.test(id))) return json({ error: "Pièce jointe invalide." }, 400);
     const found = await env.DB.prepare(
-      `SELECT id, name, type, size FROM uploads WHERE message_id IS NULL AND id IN (${fileIds.map(() => "?").join(",")})`
+      `SELECT id, name, type, size FROM uploads
+       WHERE (message_id IS NULL OR message_id = ?) AND id IN (${fileIds.map(() => "?").join(",")})`
     )
-      .bind(...fileIds)
+      .bind(draftId ? draftTag(draftId) : "", ...fileIds)
       .all();
     files = fileIds.map((id) => (found.results || []).find((f) => f.id === id)).filter(Boolean);
     if (files.length !== fileIds.length) {
@@ -458,9 +685,11 @@ async function sendMessage(request, url, env) {
 
   // Réponse : on rattache le message à la conversation d'origine.
   let inReplyTo = null;
+  let thread = null;
   if (typeof body.reply_to_id === "string" && /^[0-9a-f-]{36}$/.test(body.reply_to_id)) {
     const original = await findMessage(body.reply_to_id, env);
     if (original && original.message_id) inReplyTo = original.message_id;
+    if (original) thread = original.thread_id || original.id;
   }
 
   const payload = {
@@ -530,10 +759,10 @@ async function sendMessage(request, url, env) {
     await env.MAIL_BUCKET.put(key, bytes, { httpMetadata: { contentType: "message/rfc822" } });
     await env.DB.prepare(
       `INSERT INTO messages
-         (id, folder, direction, from_addr, from_name, to_addr, subject, message_id, date, size, is_read, r2_key)
-       VALUES (?1, 'sent', 'out', ?2, ?3, ?4, ?5, NULL, ?6, ?7, 1, ?8)`
+         (id, folder, direction, from_addr, from_name, to_addr, subject, message_id, date, size, is_read, r2_key, thread_id)
+       VALUES (?1, 'sent', 'out', ?2, ?3, ?4, ?5, NULL, ?6, ?7, 1, ?8, ?9)`
     )
-      .bind(id, sender.address, sender.name, to.list.join(", ").slice(0, 320), payload.subject, now, bytes.byteLength, key)
+      .bind(id, sender.address, sender.name, to.list.join(", ").slice(0, 320), payload.subject, now, bytes.byteLength, key, thread || id)
       .run();
     if (files.length) {
       await env.DB.prepare(`UPDATE uploads SET message_id = ? WHERE id IN (${files.map(() => "?").join(",")})`)
@@ -543,6 +772,18 @@ async function sendMessage(request, url, env) {
   } catch (err) {
     stored = false;
     console.error("Copie dans Envoyés impossible :", err);
+  }
+
+  if (draftId) {
+    // Le brouillon a servi : on l'efface, et ses fichiers restés sans message partiront au ménage.
+    try {
+      await env.DB.batch([
+        env.DB.prepare("UPDATE uploads SET message_id = NULL WHERE message_id = ?1").bind(draftTag(draftId)),
+        env.DB.prepare("DELETE FROM drafts WHERE id = ?1").bind(draftId),
+      ]);
+    } catch (err) {
+      console.error("Effacement du brouillon impossible :", err);
+    }
   }
 
   return json({ ok: true, stored });
@@ -620,7 +861,9 @@ async function readUpload(id, env) {
 async function removeUpload(id, env) {
   const row = await env.DB.prepare("SELECT message_id FROM uploads WHERE id = ?1").bind(id).first();
   if (!row) return json({ ok: true });
-  if (row.message_id) return json({ error: "Cette pièce jointe fait partie d'un message envoyé." }, 409);
+  if (row.message_id && !row.message_id.startsWith("draft:")) {
+    return json({ error: "Cette pièce jointe fait partie d'un message envoyé." }, 409);
+  }
   await env.MAIL_BUCKET.delete(`uploads/${id}`);
   await env.DB.prepare("DELETE FROM uploads WHERE id = ?1").bind(id).run();
   return json({ ok: true });
