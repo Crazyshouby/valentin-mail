@@ -26,6 +26,8 @@ import androidx.compose.ui.test.swipeLeft
 import androidx.compose.ui.test.performTextReplacement
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import androidx.test.runner.lifecycle.ActivityLifecycleMonitorRegistry
+import androidx.test.runner.lifecycle.Stage
 import kotlinx.coroutines.runBlocking
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -713,6 +715,36 @@ class E2eTest {
         shell("cmd uimode night no")
         Thread.sleep(4000)
         waitText("Réception")
+
+        // ---- « Partager » quand l'appli n'est ouverte que pour cela : une fenêtre à part, qui se referme une fois le message parti
+        val solo = Intent(Intent.ACTION_SEND)
+            .setType("text/plain")
+            .setClass(context, MainActivity::class.java)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_MULTIPLE_TASK)
+            .putExtra(Intent.EXTRA_EMAIL, arrayOf("ami@example.com"))
+            .putExtra(Intent.EXTRA_SUBJECT, "Photo de vacances")
+            .putExtra(Intent.EXTRA_TEXT, "Regarde celle-ci.")
+        context.startActivity(solo)
+        var apart: MainActivity? = null
+        rule.waitUntil(30_000) {
+            instrumentation.runOnMainSync {
+                apart = ActivityLifecycleMonitorRegistry.getInstance().getActivitiesInStage(Stage.RESUMED)
+                    .filterIsInstance<MainActivity>()
+                    .firstOrNull { it !== rule.activity }
+            }
+            apart != null
+        }
+        val window = apart!!
+        rule.waitUntil(30_000) { window.viewModel.screen == Screen.Compose && window.viewModel.draftSubject == "Photo de vacances" }
+        assertEquals("ami@example.com", window.viewModel.draftTo)
+        assertTrue("le texte partagé précède la signature", window.viewModel.draftText.startsWith("Regarde celle-ci.\n\n-- \nValentin, essai"))
+        shot("21-partage-fenetre-a-part")
+        rule.onNodeWithTag("envoyer").performClick()
+        rule.waitUntil(60_000) { window.isFinishing || window.isDestroyed }
+        // La première fenêtre revient devant, telle qu'on l'avait laissée.
+        context.startActivity(Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP))
+        waitText("Réception")
+        assertTrue("la boîte d'origine n'a pas bougé", vm.screen == Screen.Mailbox)
 
         // ---- déconnexion : le serveur ferme aussi la session, le jeton du téléphone ne vaut plus rien
         val mine = vm.prefs.token!!

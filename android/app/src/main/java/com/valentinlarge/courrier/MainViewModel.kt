@@ -1042,6 +1042,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun reloadGallery() {
+        galleryPaused = null
         loadGallery()
         startScan()
     }
@@ -1097,17 +1098,39 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (scanJob?.isActive == true) return
         scanJob = viewModelScope.launch {
             var passes = 0
+            var failures = 0
+            var stumbles = 0
             while (screen == Screen.Gallery) {
                 val remaining = try {
                     repo.api.scanAttachments()
                 } catch (e: kotlinx.coroutines.CancellationException) {
                     throw e
                 } catch (e: ApiException) {
-                    if (e.status == 429) galleryPaused = "L'inventaire a atteint la limite du jour ; il reprendra demain." else handle(e)
-                    break
+                    if (e.status == 401) {
+                        handle(e)
+                        break
+                    }
+                    if (e.status == 429) {
+                        galleryPaused = "L'inventaire a atteint la limite du jour ; il reprendra demain."
+                        break
+                    }
+                    -1
                 } catch (e: Exception) {
-                    break
+                    -1
                 }
+                if (remaining < 0) {
+                    // Un très gros message peut faire trébucher le serveur : il le met de côté et passe
+                    // aux suivants à l'essai d'après. On insiste donc un peu avant de s'arrêter.
+                    failures++
+                    stumbles++
+                    if (failures >= 8 || stumbles >= 150) {
+                        galleryPaused = "L'inventaire s'est interrompu. Tire la liste vers le bas pour le relancer."
+                        break
+                    }
+                    delay(1500)
+                    continue
+                }
+                failures = 0
                 passes++
                 val done = remaining <= 0
                 // La liste se complète au fil de l'inventaire, tant qu'on n'a pas commencé à la faire défiler loin.
