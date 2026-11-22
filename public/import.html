@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Importer depuis Gmail — Courrier</title>
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<style>
+  @font-face {
+    font-family: "Bricolage Grotesque";
+    src: url("/fonts/bricolage-grotesque.woff2") format("woff2");
+    font-weight: 200 800;
+    font-display: swap;
+  }
+  :root {
+    --paper: #f1f4f9; --surface: #fff; --ink: #17223b; --muted: #5a6880; --line: #d8dfea;
+    --blue: #1d57b8; --blue-wash: #e4ecfa; --red: #cf2f3c; --red-wash: #fbe9eb;
+    --stripe: repeating-linear-gradient(-45deg, var(--red) 0 12px, #fff 12px 24px, var(--blue) 24px 36px, #fff 36px 48px);
+  }
+  *, *::before, *::after { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body { margin: 0; background: var(--paper); color: var(--ink); font: 1.0625rem/1.5 "Bricolage Grotesque", "Segoe UI", system-ui, sans-serif; }
+  .airmail { height: 6px; background: var(--stripe); }
+  main { max-width: 36rem; margin: 0 auto; padding: 1.5rem 1.1rem 4rem; }
+  h1 { font-size: 1.75rem; line-height: 1.15; letter-spacing: -0.02em; font-weight: 700; margin: 0 0 0.4rem; }
+  h2 { font-size: 1.15rem; line-height: 1.25; font-weight: 650; margin: 0 0 0.6rem; }
+  p { margin: 0 0 0.8rem; }
+  a { color: var(--blue); }
+  .muted { color: var(--muted); font-size: 0.94rem; }
+  section { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 1.1rem; margin: 1.1rem 0; }
+  [hidden] { display: none !important; }
+  .step { color: var(--muted); font-weight: 600; font-variant-numeric: tabular-nums; margin-right: 0.35rem; }
+  label { display: block; font-weight: 600; margin: 0.8rem 0 0.35rem; }
+  input[type="text"], select { width: 100%; font: inherit; color: inherit; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 0.65rem 0.7rem; }
+  button { font: inherit; font-weight: 650; color: #fff; background: var(--blue); border: 1px solid var(--blue); border-radius: 8px; padding: 0.7rem 1rem; margin-top: 0.8rem; width: 100%; cursor: pointer; }
+  button.quiet { background: var(--surface); color: var(--ink); border-color: var(--line); }
+  button.danger { background: var(--surface); color: var(--red); border-color: var(--line); }
+  button.danger.armed { background: var(--red); color: #fff; border-color: var(--red); }
+  button:disabled { opacity: 0.5; cursor: default; }
+  :focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+  .note { margin: 0.8rem 0 0; padding: 0.7rem 0.85rem; background: var(--blue-wash); border-radius: 8px; }
+  .note.error { background: var(--red-wash); color: var(--red); }
+  .note:empty { display: none; }
+  .copyable { display: block; margin: 0.35rem 0 0.2rem; padding: 0.55rem 0.65rem; background: var(--paper); border: 1px solid var(--line); border-radius: 8px; font: 0.85rem/1.4 ui-monospace, "Cascadia Mono", monospace; overflow-wrap: anywhere; user-select: all; }
+  ol.howto { margin: 0.4rem 0 0; padding-left: 1.25rem; }
+  ol.howto li { margin-bottom: 0.55rem; }
+  dl.plan { margin: 0.6rem 0 0; display: grid; grid-template-columns: 1fr auto; gap: 0.3rem 1rem; }
+  dl.plan dt { color: var(--ink); }
+  dl.plan dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
+  dl.plan .sub { color: var(--muted); padding-left: 0.9rem; font-size: 0.94rem; }
+  dl.plan .sub + dd { color: var(--muted); font-weight: 500; font-size: 0.94rem; }
+  dl.plan .total { border-top: 1px solid var(--line); padding-top: 0.45rem; margin-top: 0.25rem; font-weight: 650; }
+  dl.plan .total + dd { border-top: 1px solid var(--line); padding-top: 0.45rem; margin-top: 0.25rem; }
+  progress { width: 100%; height: 0.7rem; margin-top: 0.8rem; accent-color: var(--blue); }
+  details { margin-top: 0.8rem; }
+  summary { cursor: pointer; font-weight: 600; color: var(--blue); }
+  ul.plain { margin: 0.5rem 0 0; padding-left: 1.1rem; }
+  ul.plain li { margin-bottom: 0.25rem; overflow-wrap: anywhere; }
+</style>
+</head>
+<body>
+<div class="airmail" aria-hidden="true"></div>
+<main>
+  <h1>Importer depuis Gmail</h1>
+  <p>Copie tes anciens messages Gmail dans cette boîte, avec leurs dossiers. Gmail n'est pas modifié : l'accès demandé est en lecture seule.</p>
+  <p class="muted"><a href="/">Retour à la boîte</a></p>
+
+  <p id="etat" class="note" role="status">Vérification…</p>
+
+  <section id="reglage" hidden>
+    <h2><span class="step">1.</span>Réglage Google, une seule fois</h2>
+    <p>Google veut savoir quelle page lui demande l'accès. Colle ici l'identifiant client créé dans la console Google Cloud.</p>
+    <details>
+      <summary>Comment créer cet identifiant</summary>
+      <ol class="howto">
+        <li>Ouvre <strong>console.cloud.google.com</strong> avec le compte Google du projet <strong>courrier</strong> (celui de Firebase), et choisis ce projet en haut de la page.</li>
+        <li>Dans la barre de recherche de la console, cherche <strong>Gmail API</strong>, ouvre-la et touche <strong>Activer</strong>.</li>
+        <li>Cherche ensuite <strong>Google Auth Platform</strong> (l'ancien « Écran de consentement OAuth »). Si la console te demande de commencer : nom de l'appli « Courrier », ton adresse comme contact, audience <strong>Externe</strong>.</li>
+        <li>Dans <strong>Audience</strong> : laisse l'état sur <strong>Test</strong> et ajoute ton adresse Gmail aux <strong>utilisateurs tests</strong>.</li>
+        <li>Dans <strong>Clients</strong> : <strong>Créer un client</strong>, type <strong>Application Web</strong>. Sous <strong>URI de redirection autorisés</strong>, ajoute exactement :
+          <span class="copyable" id="redirection"></span>
+        </li>
+        <li>Copie l'<strong>ID client</strong> affiché (il finit par <em>.apps.googleusercontent.com</em>) et colle-le ci-dessous. Ce n'est pas un secret. Le « code secret du client », lui, ne sert pas ici : ne le copie nulle part.</li>
+      </ol>
+    </details>
+    <label for="client">Identifiant client Google</label>
+    <input id="client" type="text" inputmode="url" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="…apps.googleusercontent.com">
+    <button id="enregistrer" type="button">Enregistrer</button>
+    <p id="reglage-note" class="note error"></p>
+  </section>
+
+  <section id="connexion" hidden>
+    <h2><span class="step">2.</span>Connexion à Gmail</h2>
+    <p id="connexion-texte">Google va te demander d'autoriser « Courrier » à lire tes messages. Il préviendra que l'appli n'est pas validée : c'est normal, c'est la tienne, touche « Continuer ». L'autorisation dure une heure et ne permet ni d'envoyer, ni de supprimer.</p>
+    <button id="connecter" type="button">Se connecter à Gmail en lecture seule</button>
+    <button id="changer" type="button" class="quiet">Changer l'identifiant client</button>
+  </section>
+
+  <section id="analyse" hidden>
+    <h2><span class="step">3.</span>Ce qui sera importé</h2>
+    <p id="analyse-note" class="note"></p>
+    <dl class="plan" id="plan"></dl>
+    <details id="dossiers-detail" hidden>
+      <summary>Tes dossiers</summary>
+      <ul class="plain" id="dossiers"></ul>
+    </details>
+  </section>
+
+  <section id="import" hidden>
+    <h2><span class="step">4.</span>Importer</h2>
+    <p class="muted">Garde cette page ouverte pendant l'import. Si elle se ferme, rouvre-la : l'import reprend où il en était, sans rien doubler.</p>
+    <label for="essai">Commencer par un seul dossier, pour vérifier</label>
+    <select id="essai"></select>
+    <button id="lancer-essai" type="button" class="quiet">Importer ce dossier seulement</button>
+    <button id="lancer-tout" type="button">Tout importer</button>
+    <button id="pause" type="button" class="quiet" hidden>Mettre en pause</button>
+    <progress id="avance" value="0" max="1" hidden></progress>
+    <p id="import-note" class="note" role="status"></p>
+    <details id="echecs-detail" hidden>
+      <summary id="echecs-titre">Messages non importés</summary>
+      <ul class="plain" id="echecs"></ul>
+    </details>
+  </section>
+
+  <section id="recherche" hidden>
+    <h2>Recherche dans le texte</h2>
+    <p class="muted">Les messages importés deviennent cherchables par leur texte au fil de cette préparation. Elle peut aussi se finir toute seule, peu à peu, quand tu utilises la boîte.</p>
+    <button id="indexer" type="button" class="quiet">Préparer la recherche maintenant</button>
+    <p id="recherche-note" class="note" role="status"></p>
+  </section>
+
+  <section id="annulation" hidden>
+    <h2>Défaire l'import</h2>
+    <p class="muted">Efface de cette boîte tous les messages venus de l'import, et les dossiers qu'il avait créés s'ils sont vides. Les messages arrivés autrement ne sont pas touchés, et rien ne change chez Gmail.</p>
+    <button id="defaire" type="button" class="danger">Défaire l'import</button>
+    <p id="annulation-note" class="note" role="status"></p>
+  </section>
+</main>
+<script src="/import.js"></script>
+</body>
+</html>

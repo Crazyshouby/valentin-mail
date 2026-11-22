@@ -40,6 +40,20 @@ Dans Gmail, version web pour ordinateur (sur téléphone : ouvre mail.google.com
 
 À répéter pour chaque compte Gmail.
 
+### Reprendre les anciens messages de Gmail
+
+Le transfert ne concerne que les messages à venir. Pour les anciens, ouvre `/import` sur l'adresse du webmail, dans le navigateur où tu es connecté à la boîte. La page lit Gmail en lecture seule et remet chaque message à la boîte, avec sa date, son état lu ou non lu, sa conversation et ses dossiers.
+
+- **Réglage unique** : la page demande un « ID client » Google et explique comment le créer (console Google Cloud : activer l'API Gmail, déclarer ton adresse comme utilisateur test, créer un client « Application Web » avec l'adresse de redirection que la page affiche). Cet identifiant n'est pas un secret.
+- **Ce qui est importé** : ce que tu as rangé dans un dossier, tes messages envoyés, et le reste de ta réception. Les pubs, réseaux sociaux et notifications que tu n'as rangés nulle part restent chez Google, comme le spam et la corbeille.
+- **Sans doublon** : un message déjà arrivé par le transfert est reconnu à son identifiant ; il gagne seulement ses dossiers.
+- **Reprise et annulation** : l'import peut être interrompu et relancé, et « Défaire l'import » efface tout ce qu'il a apporté, rien d'autre.
+- **Rythme** : l'import s'arrête de lui-même à 60 000 écritures par jour dans la base, pour ne jamais bloquer la réception du courrier (le forfait gratuit en accepte 100 000). Il reprend le lendemain.
+
+### Dossiers personnels
+
+En plus de Réception, Envoyés, Archives et Corbeille, la boîte accepte tes propres dossiers. Un message peut être rangé dans plusieurs ; « Finances/Énergie » crée un sous-dossier. Une règle de tri peut ranger à l'arrivée, en laissant ou non le message en réception. Les dossiers se gèrent depuis l'appli Android ; le webmail ne les affiche pas encore.
+
 ### Options
 
 - **Ouvrir le webmail sur ton domaine** : dans `wrangler.jsonc`, retire les `//` devant la ligne `routes`, puis redéploie. Le webmail répond alors sur `courrier.valentinlarge.com`.
@@ -100,6 +114,7 @@ curl -X POST 'http://localhost:8787/cdn-cgi/local/email?from=ami@exemple.fr&to=b
 | `public/` | Le webmail : page, styles, script, icônes |
 | `public/vendor/postal-mime.js` | Décodeur de mails (bibliothèque postal-mime, licence MIT-0) |
 | `public/fonts/` | Police Bricolage Grotesque (licence SIL OFL) |
+| `public/import.html`, `public/import.js` | Page d'import depuis Gmail |
 | `schema.sql` | Tables D1 (déjà appliqué en production) |
 | `wrangler.jsonc` | Configuration du déploiement |
 | `scripts/vendor.mjs` | Régénère les fichiers tiers (`npm run vendor`) |

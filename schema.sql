@@ -15,7 +15,8 @@ CREATE TABLE IF NOT EXISTS messages (
   thread_id   TEXT,                            -- conversation : identifiant de son premier message
   indexed     INTEGER NOT NULL DEFAULT 0,      -- 1 quand son texte est dans l'index de recherche
   source      TEXT,                            -- boîte d'origine d'un message importé (gmail:adresse)
-  import_ref  TEXT                             -- son identifiant là-bas : un message n'est importé qu'une fois
+  import_ref  TEXT                             -- son identifiant là-bas : un message n'est importé qu'une fois.
+                                               -- Un message arrivé normalement et retrouvé là-bas le porte aussi, sans source.
 );
 
 -- Base créée avant l'arrivée des conversations : ajouter la colonne à la main, une fois :
