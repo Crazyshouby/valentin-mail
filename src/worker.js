@@ -28,9 +28,15 @@ export default {
     if (fresh) ctx.waitUntil(pushNewMail(env).catch((err) => console.error("Notification non envoyée :", err)));
   },
 
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     try {
-      return await route(request, env);
+      const response = await route(request, env);
+      // Chaque consultation de la boîte fait avancer l'index de recherche de quelques messages,
+      // une fois la réponse partie. La réception du courrier, elle, n'attend jamais ce travail.
+      if (response.status === 200 && new URL(request.url).pathname === "/api/messages") {
+        ctx.waitUntil(indexSome(env, 2).catch((err) => console.error("Indexation impossible :", err)));
+      }
+      return response;
     } catch (err) {
       console.error("Erreur non gérée :", err && err.stack ? err.stack : err);
       return json({ error: "Erreur interne du serveur." }, 500);
@@ -124,6 +130,150 @@ async function receive(message, env) {
   }
 
   return folder === "inbox" && !read;
+}
+
+// ------------------------------------------------- recherche dans le texte
+
+const INDEX_BYTES = 256 * 1024; // on ne lit que le début d'un message : le texte y est, les pièces jointes suivent
+const INDEX_CHARS = 20000;
+
+function binaryString(bytes) {
+  let out = "";
+  for (let i = 0; i < bytes.length; i += 8192) out += String.fromCharCode.apply(null, bytes.subarray(i, i + 8192));
+  return out;
+}
+
+function binaryBytes(text) {
+  const bytes = new Uint8Array(text.length);
+  for (let i = 0; i < text.length; i++) bytes[i] = text.charCodeAt(i) & 255;
+  return bytes;
+}
+
+function quotedPrintableBytes(text) {
+  const clean = text.replace(/=\r?\n/g, "");
+  const bytes = new Uint8Array(clean.length);
+  let n = 0;
+  for (let i = 0; i < clean.length; i++) {
+    if (clean[i] === "=" && /^[0-9A-Fa-f]{2}$/.test(clean.substr(i + 1, 2))) {
+      bytes[n++] = parseInt(clean.substr(i + 1, 2), 16);
+      i += 2;
+    } else {
+      bytes[n++] = clean.charCodeAt(i) & 255;
+    }
+  }
+  return bytes.subarray(0, n);
+}
+
+function htmlToText(html) {
+  return html
+    .replace(/<(script|style|head|title)[^>]*>[\s\S]*?<\/\1>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'");
+}
+
+// Lecture volontairement simple d'un message brut : son premier corps en texte, à défaut son
+// corps HTML sans les balises. Les pièces jointes sont ignorées.
+function readableText(raw, depth = 0) {
+  const split = raw.search(/\r?\n\r?\n/);
+  const head = (split < 0 ? raw : raw.slice(0, split)).replace(/\r?\n[ \t]+/g, " ");
+  const body = split < 0 ? "" : raw.slice(split).replace(/^\r?\n\r?\n/, "");
+  const typeLine = (/^content-type:([^\r\n]*)/im.exec(head) || [, " text/plain"])[1];
+  const type = typeLine.split(";")[0].trim().toLowerCase() || "text/plain";
+  const boundary = (/boundary="?([^";]+)"?/i.exec(typeLine) || [])[1];
+
+  if (type.startsWith("multipart/")) {
+    if (!boundary || depth > 5) return null;
+    let html = null;
+    for (const part of body.split("--" + boundary).slice(1)) {
+      if (part.startsWith("--")) break;
+      const found = readableText(part.replace(/^[ \t]*\r?\n/, ""), depth + 1);
+      if (found && found.plain) return found;
+      if (found && !html) html = found;
+    }
+    return html;
+  }
+  if ((type !== "text/plain" && type !== "text/html") || /^content-disposition:\s*attachment/im.test(head)) return null;
+
+  const encoding = (/^content-transfer-encoding:\s*([^\s;]+)/im.exec(head) || [, "7bit"])[1].toLowerCase();
+  const charset = (/charset="?([^";\s]+)"?/i.exec(typeLine) || [, "utf-8"])[1];
+  let bytes;
+  if (encoding === "base64") {
+    const clean = body.replace(/[^A-Za-z0-9+/]/g, "");
+    bytes = binaryBytes(atob(clean.slice(0, clean.length - (clean.length % 4))));
+  } else if (encoding === "quoted-printable") {
+    bytes = quotedPrintableBytes(body);
+  } else {
+    bytes = binaryBytes(body);
+  }
+  let text;
+  try {
+    text = new TextDecoder(charset).decode(bytes);
+  } catch {
+    text = new TextDecoder("utf-8").decode(bytes);
+  }
+  return { plain: type === "text/plain", text: type === "text/html" ? htmlToText(text) : text };
+}
+
+const tidyText = (text) => String(text || "").replace(/\s+/g, " ").trim().slice(0, INDEX_CHARS);
+
+// Indexe quelques messages pas encore passés par là ; renvoie combien il en reste.
+async function indexSome(env, limit) {
+  const rows = await env.DB.prepare("SELECT id, r2_key FROM messages WHERE indexed = 0 ORDER BY date DESC LIMIT ?1")
+    .bind(limit)
+    .all();
+  for (const row of rows.results || []) {
+    let text = "";
+    try {
+      const object = await env.MAIL_BUCKET.get(row.r2_key, { range: { offset: 0, length: INDEX_BYTES } });
+      if (object) {
+        const found = readableText(binaryString(new Uint8Array(await object.arrayBuffer())));
+        text = found ? tidyText(found.text) : "";
+      }
+    } catch (err) {
+      console.error("Texte illisible pour la recherche :", row.id, err);
+    }
+    await env.DB.batch([
+      env.DB.prepare("DELETE FROM messages_fts WHERE id = ?1").bind(row.id),
+      env.DB.prepare("INSERT INTO messages_fts (id, body) VALUES (?1, ?2)").bind(row.id, text),
+      env.DB.prepare("UPDATE messages SET indexed = 1 WHERE id = ?1").bind(row.id),
+    ]);
+  }
+  if (!(rows.results || []).length) return 0;
+  const left = await env.DB.prepare("SELECT COUNT(*) AS n FROM messages WHERE indexed = 0").first();
+  return left ? left.n : 0;
+}
+
+// Les mots cherchés, sous la forme attendue par l'index : tous présents, chacun pouvant être un début de mot.
+function searchQuery(q) {
+  const words = (q.toLowerCase().match(/[\p{L}\p{N}]+/gu) || []).slice(0, 6);
+  return words.length ? words.map((w) => `"${w}"*`).join(" ") : "";
+}
+
+// ------------------------------------------------------------- réglages
+
+async function readSettings(env) {
+  try {
+    const rows = await env.DB.prepare("SELECT key, value FROM settings").all();
+    return Object.fromEntries((rows.results || []).map((r) => [r.key, r.value]));
+  } catch {
+    return {};
+  }
+}
+
+async function saveSettings(request, env) {
+  const body = await readJson(request);
+  if (!body) return json({ error: "Requête illisible." }, 400);
+  if (typeof body.signature === "string") {
+    await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('signature', ?1)")
+      .bind(body.signature.replace(/\r\n/g, "\n").trim().slice(0, 2000))
+      .run();
+  }
+  return json({ ok: true, signature: (await readSettings(env)).signature || "" });
 }
 
 // ------------------------------------------------- notifications poussées
@@ -413,6 +563,7 @@ async function route(request, env) {
       from: env.MAIL_FROM || "",
       address: from.address,
       addresses: await sendingAddresses(env),
+      signature: (await readSettings(env)).signature || "",
       push: Boolean(env.FCM_SERVICE_ACCOUNT),
       canSend: Boolean(env.RESEND_API_KEY && from.address),
     });
@@ -426,6 +577,8 @@ async function route(request, env) {
   if (path === "/api/messages/batch" && method === "POST") return batchMessages(request, env);
   if (path === "/api/drafts" && method === "GET") return listDrafts(env);
   if (path === "/api/push/test" && method === "POST") return testPush(env);
+  if (path === "/api/settings" && method === "PUT") return saveSettings(request, env);
+  if (path === "/api/index" && method === "POST") return json({ ok: true, remaining: await indexSome(env, 2) });
   if (path === "/api/devices" && (method === "PUT" || method === "DELETE")) return saveDevice(request, env, method === "DELETE");
   if (path === "/api/aliases" && method === "GET") return listAliases(env);
   if (path === "/api/rules" && method === "GET") return listRules(env);
@@ -664,10 +817,15 @@ async function listMessages(url, env) {
   }
   if (q) {
     const like = "%" + q.replace(/[\\%_]/g, "\\$&") + "%";
+    const match = searchQuery(q);
+    // En-têtes du message, ou texte du message quand l'index le connaît déjà.
     where.push(
-      "(subject LIKE ? ESCAPE '\\' OR from_addr LIKE ? ESCAPE '\\' OR from_name LIKE ? ESCAPE '\\' OR to_addr LIKE ? ESCAPE '\\')"
+      "(subject LIKE ? ESCAPE '\\' OR from_addr LIKE ? ESCAPE '\\' OR from_name LIKE ? ESCAPE '\\' OR to_addr LIKE ? ESCAPE '\\'" +
+        (match ? " OR id IN (SELECT id FROM messages_fts WHERE messages_fts MATCH ?)" : "") +
+        ")"
     );
     params.push(like, like, like, like);
+    if (match) params.push(match);
   }
 
   const [list, unread] = await env.DB.batch([
@@ -1068,11 +1226,16 @@ async function sendMessage(request, url, env) {
     await env.MAIL_BUCKET.put(key, bytes, { httpMetadata: { contentType: "message/rfc822" } });
     await env.DB.prepare(
       `INSERT INTO messages
-         (id, folder, direction, from_addr, from_name, to_addr, subject, message_id, date, size, is_read, r2_key, thread_id)
-       VALUES (?1, 'sent', 'out', ?2, ?3, ?4, ?5, NULL, ?6, ?7, 1, ?8, ?9)`
+         (id, folder, direction, from_addr, from_name, to_addr, subject, message_id, date, size, is_read, r2_key, thread_id, indexed)
+       VALUES (?1, 'sent', 'out', ?2, ?3, ?4, ?5, NULL, ?6, ?7, 1, ?8, ?9, 1)`
     )
       .bind(id, fromAddress, sender.name, to.list.join(", ").slice(0, 320), payload.subject, now, bytes.byteLength, key, thread || id)
       .run();
+    // Le texte d'un message qu'on envoie est connu : il entre tout de suite dans la recherche.
+    await env.DB.prepare("INSERT INTO messages_fts (id, body) VALUES (?1, ?2)")
+      .bind(id, tidyText(text))
+      .run()
+      .catch((err) => console.error("Message envoyé non indexé :", err));
     if (files.length) {
       await env.DB.prepare(`UPDATE uploads SET message_id = ? WHERE id IN (${files.map(() => "?").join(",")})`)
         .bind(id, ...files.map((f) => f.id))
