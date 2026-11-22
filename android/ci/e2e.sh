@@ -55,6 +55,11 @@ adb install -r "$APKS/debug/app-debug.apk" || exit 1
 adb install -r "$APKS/androidTest/debug/app-debug-androidTest.apk" || exit 1
 adb shell pm grant "$APP" android.permission.POST_NOTIFICATIONS || true
 adb shell settings put secure show_ime_with_hard_keyboard 0 || true
+# Un émulateur chargé affiche parfois « l'appli ne répond pas » par-dessus tout : on masque ces fenêtres.
+adb shell settings put global hide_error_dialogs 1 || true
+adb shell am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS > /dev/null 2>&1 || true
+sleep 20
+adb shell am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS > /dev/null 2>&1 || true
 adb logcat -c || true
 
 adb shell am instrument -w -e motdepasse "$TEST_PASSWORD" \

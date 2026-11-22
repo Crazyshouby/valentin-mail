@@ -1,5 +1,6 @@
 package com.valentinlarge.courrier
 
+import android.accessibilityservice.AccessibilityService
 import android.app.Notification
 import android.app.NotificationManager
 import android.graphics.Bitmap
@@ -13,7 +14,6 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performTextReplacement
-import androidx.test.espresso.Espresso
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import kotlinx.coroutines.runBlocking
@@ -43,7 +43,7 @@ class E2eTest {
 
     private fun shot(name: String) {
         rule.waitForIdle()
-        Thread.sleep(900) // le temps que le contenu du message soit dessiné
+        Thread.sleep(1500) // le temps que le contenu du message soit dessiné
         val screen = instrumentation.uiAutomation.takeScreenshot() ?: return
         val bitmap = screen.copy(Bitmap.Config.ARGB_8888, false) ?: return
         val dir = File(context.filesDir, "captures").apply { mkdirs() }
@@ -112,7 +112,7 @@ class E2eTest {
         shot("03-message-html")
         rule.onNodeWithText("facture.txt", substring = true).performClick()
         waitText("Enregistrer sur l'appareil")
-        Espresso.pressBack()
+        instrumentation.uiAutomation.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
         waitGone("Enregistrer sur l'appareil")
         rule.onNodeWithText("Afficher les détails").performClick()
         waitText("Répondre à")
@@ -134,7 +134,7 @@ class E2eTest {
         piece.writeText("Contenu de la pièce jointe d'essai.\n".repeat(40))
         rule.runOnUiThread { vm.addFiles(listOf(Uri.fromFile(piece))) }
         waitText("essai-piece.txt")
-        Espresso.closeSoftKeyboard()
+        shell("input keyevent 111") // referme le clavier
         shot("06-reponse")
 
         rule.onNodeWithTag("envoyer").performClick()
