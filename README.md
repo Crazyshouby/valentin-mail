@@ -92,6 +92,19 @@ curl -X POST 'http://localhost:8787/cdn-cgi/local/email?from=ami@exemple.fr&to=b
   --data-binary @message.eml
 ```
 
+## Appli Android
+
+Le dossier `android/` (branche `android-app`) contient une appli native, « Courrier », qui parle
+au même serveur : connexion par mot de passe, dossiers et recherche, lecture hors connexion des
+messages déjà reçus, réponse avec pièces jointes, notification des nouveaux mails (relève toutes
+les quinze minutes environ).
+
+Chaque envoi sur la branche lance `.github/workflows/android.yml` : compilation, parcours complet
+dans un émulateur contre le serveur lancé en local (`android/ci/e2e.sh`), puis publication d'un
+APK signé dans les *Releases* du dépôt. La clé de signature est rangée chiffrée dans
+`android/signing/` ; seule la phrase du secret GitHub `SIGNING_PASSPHRASE` permet de l'ouvrir.
+Ne change pas ce secret : une autre clé empêcherait les mises à jour de s'installer.
+
 ## Fichiers
 
 | Fichier | Rôle |

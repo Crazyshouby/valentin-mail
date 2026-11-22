@@ -61,6 +61,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
@@ -428,7 +429,9 @@ internal fun pageFor(mail: ParsedMail): String {
 @Composable
 private fun MailBody(page: String, remote: Boolean, onLink: (Uri) -> Unit, modifier: Modifier) {
     AndroidView(
-        modifier = modifier,
+        // Sans cette découpe, le fond blanc que la vue web peint en attendant sa page
+        // déborde et recouvre l'en-tête du message.
+        modifier = modifier.clipToBounds(),
         factory = { context ->
             WebView(context).apply {
                 layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
