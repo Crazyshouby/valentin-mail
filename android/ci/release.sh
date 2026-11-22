@@ -41,7 +41,9 @@ export COURRIER_KEYSTORE="$KEYSTORE"
 gradle -p android assembleRelease
 rm -f "$KEYSTORE"
 
-VERSION="0.3.${COURRIER_BUILD:-1}"
+# Le numéro vient du projet lui-même, pour que la publication porte le même que l'appli.
+SERIES="$(sed -n 's/.*versionName = "\([0-9]*\.[0-9]*\)\..*/\1/p' android/app/build.gradle.kts | head -n 1)"
+VERSION="${SERIES:-0.4}.${COURRIER_BUILD:-1}"
 APK="${RUNNER_TEMP:-/tmp}/courrier.apk"
 cp android/app/build/outputs/apk/release/app-release.apk "$APK"
 APKSIGNER="$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -n 1)"
