@@ -1218,7 +1218,7 @@ function rawHead(bytes) {
 
 async function importStatus(env) {
   const [imported, unindexed] = await env.DB.batch([
-    env.DB.prepare("SELECT COUNT(*) AS n FROM messages WHERE import_ref IS NOT NULL"),
+    env.DB.prepare("SELECT COUNT(*) AS n FROM messages WHERE import_ref IS NOT NULL AND source IS NOT NULL"),
     env.DB.prepare("SELECT COUNT(*) AS n FROM messages WHERE indexed = 0"),
     env.DB.prepare("DELETE FROM cache WHERE key LIKE 'writes:%' AND expires < ?1").bind(Date.now()),
   ]);
@@ -1303,9 +1303,12 @@ async function importMessage(ref, request, url, env) {
 
   // Déjà là sous un autre jour — arrivé par le transfert automatique, par exemple : on ne le double pas.
   // Il gagne seulement ses dossiers, et sa conversation rejoint celle de l'autre boîte.
+  // Il retient aussi sa référence là-bas, sans devenir pour autant un message importé : défaire l'import
+  // ne l'effacera pas, et une reprise le reconnaîtra sans le retélécharger.
   const twin = messageId ? (byId.results || [])[0] : null;
   if (twin) {
     const statements = filing(twin.id);
+    if (!twin.import_ref) statements.push(env.DB.prepare("UPDATE messages SET import_ref = ?1 WHERE id = ?2").bind(importRef, twin.id));
     if (thread && !twin.import_ref && twin.thread_id !== thread) {
       statements.push(
         twin.thread_id
