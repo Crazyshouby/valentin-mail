@@ -13,17 +13,43 @@ CREATE TABLE IF NOT EXISTS messages (
   is_read     INTEGER NOT NULL DEFAULT 0,
   r2_key      TEXT NOT NULL,
   thread_id   TEXT,                            -- conversation : identifiant de son premier message
-  indexed     INTEGER NOT NULL DEFAULT 0       -- 1 quand son texte est dans l'index de recherche
+  indexed     INTEGER NOT NULL DEFAULT 0,      -- 1 quand son texte est dans l'index de recherche
+  source      TEXT,                            -- boîte d'origine d'un message importé (gmail:adresse)
+  import_ref  TEXT                             -- son identifiant là-bas : un message n'est importé qu'une fois
 );
 
 -- Base créée avant l'arrivée des conversations : ajouter la colonne à la main, une fois :
 --   ALTER TABLE messages ADD COLUMN thread_id TEXT;
 --   UPDATE messages SET thread_id = id WHERE thread_id IS NULL;
 --   ALTER TABLE messages ADD COLUMN indexed INTEGER NOT NULL DEFAULT 0;
+-- Base créée avant l'import et les dossiers personnels :
+--   ALTER TABLE messages ADD COLUMN source TEXT;
+--   ALTER TABLE messages ADD COLUMN import_ref TEXT;
+--   ALTER TABLE rules ADD COLUMN target TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_messages_folder_date ON messages (folder, date DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_unread ON messages (folder, is_read);
 CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages (thread_id);
+-- Retrouver un message par son identifiant d'origine : conversations, et doublons à l'import.
+CREATE INDEX IF NOT EXISTS idx_messages_message_id ON messages (message_id) WHERE message_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_import_ref ON messages (import_ref) WHERE import_ref IS NOT NULL;
+
+-- Dossiers personnels. Un message peut être rangé dans plusieurs ; « Parent/Enfant » fait un sous-dossier.
+-- source : rempli quand le dossier a été créé par un import, pour pouvoir défaire l'import proprement.
+CREATE TABLE IF NOT EXISTS labels (
+  id      TEXT PRIMARY KEY,
+  name    TEXT NOT NULL UNIQUE,
+  source  TEXT,
+  created INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS message_labels (
+  message_id TEXT NOT NULL,
+  label_id   TEXT NOT NULL,
+  PRIMARY KEY (message_id, label_id)
+) WITHOUT ROWID;
+
+CREATE INDEX IF NOT EXISTS idx_message_labels_label ON message_labels (label_id);
 
 CREATE TABLE IF NOT EXISTS drafts (
   id          TEXT PRIMARY KEY,
@@ -69,7 +95,8 @@ CREATE TABLE IF NOT EXISTS rules (
   id      TEXT PRIMARY KEY,
   field   TEXT NOT NULL,   -- from | to | subject
   value   TEXT NOT NULL,   -- texte à repérer, sans tenir compte des majuscules
-  action  TEXT NOT NULL,   -- archive | trash | read | block
+  action  TEXT NOT NULL,   -- archive | trash | read | block | label | file
+  target  TEXT,            -- pour label et file : le dossier personnel où ranger
   created INTEGER NOT NULL
 );
 
@@ -87,6 +114,7 @@ CREATE TABLE IF NOT EXISTS cache (
 );
 
 -- Texte des messages, pour la recherche. Rempli peu à peu, à chaque consultation de la boîte.
+-- Chaque ligne porte le même numéro (rowid) que son message : on la retrouve sans parcourir l'index.
 CREATE INDEX IF NOT EXISTS idx_messages_indexed ON messages (indexed, date DESC);
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(id UNINDEXED, body, tokenize = 'unicode61 remove_diacritics 2');
 
