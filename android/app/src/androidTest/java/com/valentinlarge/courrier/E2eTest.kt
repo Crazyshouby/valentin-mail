@@ -7,6 +7,8 @@ import android.app.NotificationManager
 import android.content.ContentValues
 import android.content.Intent
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Color
 import android.net.Uri
 import android.provider.MediaStore
 import android.util.Base64
@@ -151,6 +153,12 @@ class E2eTest {
         val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: error("Le téléphone n'a pas accepté le fichier d'essai.")
         resolver.openOutputStream(uri)!!.use { it.write(content.toByteArray()) }
         return uri
+    }
+
+    /** Lit une vignette enregistrée : ses dimensions, et la couleur de son centre. */
+    private fun look(file: File): Triple<Int, Int, Int> {
+        val bitmap = BitmapFactory.decodeFile(file.path) ?: error("Vignette illisible : ${file.name}")
+        return Triple(bitmap.width, bitmap.height, bitmap.getPixel(bitmap.width / 2, bitmap.height / 2))
     }
 
     private fun closeComposer() {
@@ -659,13 +667,53 @@ class E2eTest {
         rule.waitUntil(30_000) { vm.folder == "inbox" && vm.messages.any { it.subject == "Demande de devis" } }
         waitText("Réception")
 
+        // ---- un message avec deux images : une photo couchée qui porte sa miniature (rouge, la photo est bleue), et un dessin vert
+        val photos = instrumentation.context.assets.open("photos.eml").use { it.readBytes() }
+        val arrival = Request.Builder()
+            .url("${vm.prefs.server}/cdn-cgi/local/email?from=chantier@example.net&to=valentin@valentinlarge.com")
+            .header("Host", "127.0.0.1:8787")
+            .post(photos.toRequestBody())
+            .build()
+        OkHttpClient().newCall(arrival).execute().use { assertEquals(200, it.code) }
+
         // ---- galerie des pièces jointes : reçues et envoyées, sans ouvrir les messages
         menu("Pièces jointes")
-        rule.waitUntil(30_000) { vm.screen == Screen.Gallery && !vm.galleryLoading && vm.gallery.any { it.name == "essai-piece.txt" } }
+        rule.waitUntil(30_000) {
+            vm.screen == Screen.Gallery && !vm.galleryLoading && vm.gallery.any { it.name == "essai-piece.txt" } && vm.gallery.any { it.name == "photo.jpg" }
+        }
         val facture = vm.gallery.first { it.name == "facture.txt" && !it.outgoing }
         assertTrue("les pièces envoyées y sont aussi", vm.gallery.any { it.name == "essai-piece.txt" && it.outgoing })
         waitText("facture.txt")
+
+        // ---- vignettes : les images montrent un aperçu, les autres fichiers leur type
+        val photo = vm.gallery.first { it.name == "photo.jpg" }
+        val drawing = vm.gallery.first { it.name == "dessin.png" }
+        rule.waitUntil(30_000) { vm.cachedThumb(photo) != null && vm.cachedThumb(drawing) != null }
+        assertTrue("un fichier qui n'est pas une image n'a pas de vignette", vm.cachedThumb(facture) == null)
         shot("17g-pieces-jointes")
+        // Petite, la photo est prise entière : la vignette est bleue, et redressée (plus haute que large).
+        val whole = look(vm.repo.cachedThumbnail(photo)!!)
+        assertTrue("vignette tirée de la photo entière, redressée", whole.second > whole.first && Color.blue(whole.third) > 150 && Color.red(whole.third) < 100)
+        val green = look(vm.repo.cachedThumbnail(drawing)!!)
+        assertTrue("vignette du dessin", Color.green(green.third) > 130 && Color.red(green.third) < 90)
+        // Grande, on ne demande au serveur que son début : la vignette est la miniature rouge qu'elle porte, redressée elle aussi.
+        Thumbs.smallBytes = 0
+        try {
+            vm.repo.cachedThumbnail(photo)!!.delete()
+            vm.repo.cachedThumbnail(drawing)!!.delete()
+            val carried = look(runBlocking { vm.repo.thumbnail(photo, wifi = false) }!!)
+            assertTrue("vignette tirée du début de la photo, redressée", carried.second > carried.first && Color.red(carried.third) > 150 && Color.blue(carried.third) < 100)
+            // Une grande image sans miniature attend le Wi-Fi.
+            assertTrue("pas de grande image téléchargée sur un réseau compté", runBlocking { vm.repo.thumbnail(drawing, wifi = false) } == null)
+            assertTrue("en Wi-Fi, elle est prise entière", runBlocking { vm.repo.thumbnail(drawing, wifi = true) } != null)
+        } finally {
+            Thumbs.smallBytes = 600L * 1024
+        }
+        rule.onNodeWithTag("famille-image").performClick()
+        rule.waitUntil(30_000) { vm.galleryKind == "image" && !vm.galleryLoading && vm.gallery.map { it.name }.sorted() == listOf("dessin.png", "photo.jpg") }
+        shot("17g2-images")
+        rule.onNodeWithTag("famille-tout").performClick()
+        rule.waitUntil(30_000) { vm.galleryKind == "" && !vm.galleryLoading && vm.gallery.any { it.name == "facture.txt" } }
         // Une pièce se télécharge seule, et l'appli la décode elle-même.
         assertEquals("Facture 778 : 42,00 EUR", runBlocking { vm.fetchAttachment(facture) }!!.file.readText())
         val sentPiece = vm.gallery.first { it.name == "essai-piece.txt" }

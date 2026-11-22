@@ -1,9 +1,13 @@
 package com.valentinlarge.courrier
 
 import android.app.Application
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.net.ConnectivityManager
 import android.net.Uri
 import android.os.SystemClock
 import android.provider.OpenableColumns
+import android.util.LruCache
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
@@ -15,6 +19,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.time.Instant
@@ -461,6 +467,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var galleryJob: Job? = null
     private var scanJob: Job? = null
 
+    // Les vignettes déjà affichées, gardées en mémoire (16 Mo au plus) ; au-delà, elles se relisent sur l'appareil.
+    private val thumbs = object : LruCache<String, Bitmap>(16 * 1024 * 1024) {
+        override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount
+    }
+
+    /** Les images pour lesquelles il n'y a pas de vignette à faire pour l'instant (réseau compté, format illisible). */
+    private val thumbless = HashSet<String>()
+
+    /** Pas plus de trois vignettes en fabrication à la fois. */
+    private val thumbGate = Semaphore(3)
+
     // Un signal arrivé pendant que la boîte est à l'écran la met à jour sans attendre.
     private val pushListener: () -> Unit = { if (screen == Screen.Mailbox && folder == "inbox") refresh() }
 
@@ -559,6 +576,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             boxes = emptyList()
             sessions = emptyList()
             gallery = emptyList()
+            thumbs.evictAll()
+            thumbless.clear()
             opened = null
             unread = 0
             locked = false
@@ -1025,6 +1044,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun openGallery() {
         screen = Screen.Gallery
         galleryPaused = null
+        // Le réseau a pu changer depuis la dernière visite : les grandes images ont une nouvelle chance.
+        thumbless.clear()
         loadGallery()
         startScan()
     }
@@ -1142,6 +1163,39 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 delay(250)
             }
         }
+    }
+
+    /** La vignette d'une image, si elle est déjà en mémoire. */
+    fun cachedThumb(attachment: Attachment): Bitmap? = thumbs.get(attachment.key)
+
+    /** Vrai si le réseau du moment est compté (données mobiles) : on n'y télécharge pas de grande image pour une vignette. */
+    private fun metered(): Boolean =
+        app.getSystemService(ConnectivityManager::class.java)?.isActiveNetworkMetered ?: true
+
+    /** La vignette d'une image de la galerie : relue sur l'appareil, ou fabriquée ; null s'il n'y en a pas pour l'instant. */
+    suspend fun thumbnail(attachment: Attachment): Bitmap? {
+        thumbs.get(attachment.key)?.let { return it }
+        if (attachment.kind != "image" || attachment.key in thumbless) return null
+        val file = repo.cachedThumbnail(attachment) ?: try {
+            thumbGate.withPermit { repo.thumbnail(attachment, wifi = !metered()) }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // Réseau coupé, serveur occupé : on réessaiera quand la ligne reviendra à l'écran.
+            return null
+        } catch (e: OutOfMemoryError) {
+            null
+        }
+        val bitmap = if (file == null) null else withContext(Dispatchers.IO) {
+            BitmapFactory.decodeFile(file.path, BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.RGB_565 })
+        }
+        if (bitmap == null) {
+            file?.delete()
+            thumbless.add(attachment.key)
+            return null
+        }
+        thumbs.put(attachment.key, bitmap)
+        return bitmap
     }
 
     /** Prépare une pièce de la galerie pour l'ouvrir ou l'enregistrer. */

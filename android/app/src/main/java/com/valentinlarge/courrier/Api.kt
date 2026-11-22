@@ -415,6 +415,33 @@ class Api(private val prefs: Prefs) {
         }
     }
 
+    /**
+     * Le début d'une pièce jointe ([bytes] octets au plus), tel qu'il est écrit dans le message, et la
+     * façon dont il est codé. Sert à lire la miniature qu'une photo porte dans ses premiers octets.
+     */
+    suspend fun attachmentHead(messageId: String, part: Int, bytes: Int): Pair<ByteArray, String> = withContext(Dispatchers.IO) {
+        val query = mapOf("head" to bytes.toString())
+        execute(request("/api/messages/$messageId/attachments/$part", query).get().build()).use { response ->
+            if (!response.isSuccessful) throw failure(response)
+            val encoding = response.header("X-Part-Encoding").orEmpty().trim().lowercase()
+            // On ne lit jamais plus que demandé, même si le serveur en envoyait davantage.
+            val buffer = ByteArray(bytes)
+            var total = 0
+            try {
+                response.body!!.byteStream().use { input ->
+                    while (total < buffer.size) {
+                        val n = input.read(buffer, total, buffer.size - total)
+                        if (n < 0) break
+                        total += n
+                    }
+                }
+            } catch (e: IOException) {
+                throw OfflineException()
+            }
+            (if (total == buffer.size) buffer else buffer.copyOf(total)) to encoding
+        }
+    }
+
     /** Une même action sur plusieurs messages : lu ou non lu, changement de dossier, rangement, suppression. */
     suspend fun batch(
         ids: List<String>,

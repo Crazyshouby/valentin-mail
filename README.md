@@ -123,7 +123,10 @@ Elle sait aussi :
 
 - recevoir un **partage** : « Partager » depuis une autre appli (texte, photo, fichiers) ouvre un
   nouveau message, et une adresse mail touchée dans un navigateur propose Courrier pour écrire ;
-- montrer la **galerie des pièces jointes** (menu ⋮), triée par famille de fichiers, avec recherche ;
+- montrer la **galerie des pièces jointes** (menu ⋮), triée par famille de fichiers, avec recherche.
+  Les images y ont une vignette, fabriquée en téléchargeant le moins possible : une petite image est
+  prise entière, une photo ne donne que son début (elle y range une miniature d'elle-même), et une
+  grande image sans miniature attend le Wi-Fi ;
 - se **verrouiller par empreinte** (Réglages) : le téléphone vérifie l'empreinte ou son code, à
   l'ouverture et après plus d'une minute d'absence — l'appli ne voit ni l'une ni l'autre ;
 - lister les **appareils connectés** (Réglages) et les déconnecter à distance ;

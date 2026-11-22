@@ -1,6 +1,7 @@
 package com.valentinlarge.courrier
 
 import android.content.Context
+import android.graphics.Bitmap
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -30,6 +31,7 @@ class Repo private constructor(context: Context) {
 
     private val rawDir = File(app.filesDir, "messages")
     private val pieceDir = File(app.cacheDir, "pieces")
+    private val thumbDir = File(app.cacheDir, "vignettes")
 
     private fun rawFile(id: String) = File(rawDir, "$id.eml")
 
@@ -226,11 +228,56 @@ class Repo private constructor(context: Context) {
         return LocalFile(remote.name, remote.type, target)
     }
 
+    private fun galleryFile(attachment: Attachment) =
+        File(File(pieceDir, "${attachment.messageId}-galerie"), "${attachment.part}-${Mime.safeName(attachment.name)}")
+
     /** Pièce jointe choisie dans la galerie : téléchargée seule, sans le reste du message. */
     suspend fun attachmentFile(attachment: Attachment): LocalFile {
-        val target = File(File(pieceDir, "${attachment.messageId}-galerie"), "${attachment.part}-${Mime.safeName(attachment.name)}")
+        val target = galleryFile(attachment)
         if (!target.exists() || target.length() == 0L) api.downloadAttachment(attachment.messageId, attachment.part, target)
         return LocalFile(attachment.name, attachment.mime, target)
+    }
+
+    private fun thumbFile(attachment: Attachment) = File(thumbDir, "${attachment.messageId}-${attachment.part}.jpg")
+
+    /** La vignette déjà fabriquée pour cette image, s'il y en a une. */
+    fun cachedThumbnail(attachment: Attachment): File? = thumbFile(attachment).takeIf { it.length() > 0 }
+
+    /**
+     * Fabrique la vignette d'une image de la galerie en téléchargeant le moins possible (voir [Thumbs]).
+     * [wifi] : le réseau n'est pas compté, on peut y prendre une grande image entière.
+     * Renvoie null quand il n'y a pas de vignette à faire pour l'instant.
+     */
+    suspend fun thumbnail(attachment: Attachment, wifi: Boolean): File? {
+        val target = thumbFile(attachment)
+        if (target.length() > 0) return target
+        if (attachment.size <= 0 || attachment.size > Thumbs.BIG_BYTES) return null
+        val small = attachment.size <= Thumbs.smallBytes
+        var bitmap: Bitmap? = null
+
+        // Une photo : sa miniature tient dans le début du fichier.
+        if (!small && Thumbs.isPhoto(attachment)) {
+            val (raw, encoding) = api.attachmentHead(attachment.messageId, attachment.part, Thumbs.HEAD_BYTES)
+            bitmap = withContext(Dispatchers.IO) { Thumbs.decodeHead(raw, encoding)?.let { Thumbs.exifThumbnail(it) } }
+        }
+
+        // Sinon l'image entière : toujours si elle est petite, seulement en Wi-Fi si elle est grande.
+        if (bitmap == null && (small || wifi)) {
+            val known = galleryFile(attachment)
+            val source = if (known.length() > 0) known else File(thumbDir, "${attachment.messageId}-${attachment.part}.source")
+            if (source != known) api.downloadAttachment(attachment.messageId, attachment.part, source)
+            bitmap = withContext(Dispatchers.IO) {
+                try {
+                    Thumbs.fromFile(source)
+                } finally {
+                    if (source != known) source.delete()
+                }
+            }
+        }
+
+        val made = bitmap ?: return null
+        withContext(Dispatchers.IO) { Thumbs.save(made, target) }
+        return target
     }
 
     private fun forget(id: String) {
@@ -238,6 +285,7 @@ class Repo private constructor(context: Context) {
         File(pieceDir, id).deleteRecursively()
         File(pieceDir, "$id-envoi").deleteRecursively()
         File(pieceDir, "$id-galerie").deleteRecursively()
+        thumbDir.listFiles { file -> file.name.startsWith("$id-") }?.forEach { it.delete() }
     }
 
     /** Efface tout ce que l'appareil garde de la boîte ; [remote] ferme aussi la session sur le serveur. */
@@ -254,6 +302,7 @@ class Repo private constructor(context: Context) {
             db.clear()
             rawDir.deleteRecursively()
             pieceDir.deleteRecursively()
+            thumbDir.deleteRecursively()
         }
     }
 }

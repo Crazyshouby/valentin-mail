@@ -2,6 +2,7 @@ package com.valentinlarge.courrier
 
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -45,6 +46,7 @@ import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -52,6 +54,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
@@ -230,12 +234,7 @@ private fun AttachmentRow(
                     .padding(start = 14.dp, end = 16.dp, top = 11.dp, bottom = 12.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Box(
-                    Modifier.size(44.dp).background(BlueWash, RoundedCornerShape(8.dp)),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(badgeOf(attachment), style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold, color = Blue, maxLines = 1)
-                }
+                Thumb(vm, attachment)
                 Spacer(Modifier.width(12.dp))
                 Column(Modifier.weight(1f)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -278,6 +277,30 @@ private fun AttachmentRow(
             }
         }
         HorizontalDivider(color = Line)
+    }
+}
+
+/** Le carré à gauche d'une pièce : la vignette d'une image dès qu'elle est prête, sinon le type du fichier. */
+@Composable
+private fun Thumb(vm: MainViewModel, attachment: Attachment) {
+    val bitmap by produceState(vm.cachedThumb(attachment), attachment.key) {
+        if (value == null) value = vm.thumbnail(attachment)
+    }
+    val ready = bitmap
+    Box(
+        Modifier.size(52.dp).clip(RoundedCornerShape(8.dp)).background(BlueWash).testTag("vignette-${attachment.name}"),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (ready != null) {
+            Image(
+                bitmap = remember(ready) { ready.asImageBitmap() },
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
+            )
+        } else {
+            Text(badgeOf(attachment), style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold, color = Blue, maxLines = 1)
+        }
     }
 }
 
