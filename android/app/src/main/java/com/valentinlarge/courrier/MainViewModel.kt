@@ -261,8 +261,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /** Les dossiers dont on a déplié les sous-dossiers ; au départ, tous sont repliés. */
+    var openFolders by mutableStateOf(repo.prefs.openFolders)
+        private set
+
+    /** Déplie ou replie les sous-dossiers d'un dossier ; le choix est gardé d'une fois sur l'autre. */
+    fun toggleFolder(id: String) {
+        openFolders = if (id in openFolders) openFolders - id else openFolders + id
+        repo.prefs.openFolders = openFolders
+    }
+
+    /** Déplie ce qu'il faut pour qu'un dossier soit visible dans la liste. */
+    private fun revealFolder(id: String) {
+        val missing = ancestorsOf(labelTree(labels), id) - openFolders
+        if (missing.isEmpty()) return
+        openFolders = openFolders + missing
+        repo.prefs.openFolders = openFolders
+    }
+
+    /** Avant de montrer la liste des dossiers : celui qu'on regarde doit s'y voir, même s'il est un sous-dossier. */
+    fun revealCurrentFolder() {
+        labelIdOf(folder)?.let { revealFolder(it) }
+    }
+
     /** Applique un changement à un dossier, puis relit la liste telle que le serveur la garde. */
-    private fun labelChange(change: suspend () -> Unit) {
+    private fun labelChange(after: () -> Unit = {}, change: suspend () -> Unit) {
         if (labelBusy) return
         labelBusy = true
         labelError = null
@@ -270,6 +293,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 change()
                 labels = repo.labels()
+                after()
             } catch (e: Exception) {
                 labelError = handle(e)
             }
@@ -279,7 +303,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun createLabel(name: String) {
         if (name.isBlank()) return
-        labelChange { repo.api.saveLabel(UUID.randomUUID().toString(), name.trim()) }
+        val id = UUID.randomUUID().toString()
+        // Un sous-dossier tout juste créé se montre : son parent se déplie.
+        labelChange(after = { revealFolder(id) }) { repo.api.saveLabel(id, name.trim()) }
     }
 
     fun renameLabel(label: Label, name: String) {
@@ -624,6 +650,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             scanJob?.cancel()
             messages = emptyList()
             labels = emptyList()
+            openFolders = emptySet()
             boxes = emptyList()
             sessions = emptyList()
             gallery = emptyList()

@@ -66,6 +66,54 @@ fun labelTree(labels: List<Label>): List<LabelNode> {
     }
 }
 
+/**
+ * Une ligne de l'arbre telle qu'on l'affiche : [parent] si elle contient des sous-dossiers, [open] si
+ * ceux-ci sont dépliés, [visible] tant qu'aucun de ses parents n'est replié. Repliée, elle porte aussi
+ * dans [unread] les non-lus de ce qu'elle cache.
+ */
+data class FolderRow(val node: LabelNode, val parent: Boolean, val open: Boolean, val visible: Boolean, val unread: Int)
+
+/** Prépare l'arbre pour l'affichage ; [opened] : les dossiers dépliés (aucun au départ). */
+fun folderRows(tree: List<LabelNode>, opened: Set<String>): List<FolderRow> {
+    val rows = ArrayList<FolderRow>(tree.size)
+    // Pour chaque niveau au-dessus de la ligne en cours : ce parent est-il déplié ?
+    val path = ArrayList<Boolean>()
+    for ((index, node) in tree.withIndex()) {
+        while (path.size > node.depth) path.removeAt(path.size - 1)
+        while (path.size < node.depth) path.add(true)
+        val parent = index + 1 < tree.size && tree[index + 1].depth > node.depth
+        val open = parent && node.label.id in opened
+        var unread = node.label.unread
+        if (parent && !open) {
+            var next = index + 1
+            while (next < tree.size && tree[next].depth > node.depth) {
+                unread += tree[next].label.unread
+                next++
+            }
+        }
+        rows.add(FolderRow(node, parent, open, visible = path.all { it }, unread = unread))
+        path.add(open)
+    }
+    return rows
+}
+
+/** Les dossiers au-dessus de celui-ci dans l'arbre : ceux qu'il faut déplier pour le voir. */
+fun ancestorsOf(tree: List<LabelNode>, id: String): Set<String> {
+    val index = tree.indexOfFirst { it.label.id == id }
+    if (index < 0) return emptySet()
+    val found = HashSet<String>()
+    var depth = tree[index].depth
+    var i = index - 1
+    while (i >= 0 && depth > 0) {
+        if (tree[i].depth < depth) {
+            found.add(tree[i].label.id)
+            depth = tree[i].depth
+        }
+        i--
+    }
+    return found
+}
+
 // La liste affiche soit un dossier de la boîte (« inbox », « archive »…), soit un dossier personnel,
 // désigné alors par « label: » suivi de son identifiant.
 private const val LABEL_PREFIX = "label:"
@@ -245,13 +293,18 @@ class Prefs(context: Context) {
         get() = sp.getString("theme", "auto") ?: "auto"
         set(value) = sp.edit().putString("theme", value).apply()
 
+    /** Les dossiers personnels dont les sous-dossiers sont dépliés dans la liste ; aucun au départ. */
+    var openFolders: Set<String>
+        get() = sp.getStringSet("open_folders", null)?.toSet() ?: emptySet()
+        set(value) = sp.edit().putStringSet("open_folders", value.toSet()).apply()
+
     /** Vrai si l'appli demande l'empreinte (ou le code du téléphone) avant de montrer le courrier. */
     var lockEnabled: Boolean
         get() = sp.getBoolean("lock", false)
         set(value) = sp.edit().putBoolean("lock", value).apply()
 
     fun clearSession() {
-        sp.edit().remove("token").remove("from").remove("address").remove("can_send").remove("signature").remove("push_server").remove("push_token").remove("addresses").remove("last_seen").remove("labels").apply()
+        sp.edit().remove("token").remove("from").remove("address").remove("can_send").remove("signature").remove("push_server").remove("push_token").remove("addresses").remove("last_seen").remove("labels").remove("open_folders").apply()
     }
 }
 

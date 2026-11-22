@@ -212,7 +212,10 @@ fun MailboxPage(vm: MainViewModel, cascade: Boolean) {
                 if (on) {
                     SelectionBar(vm, onDeleteForever = { confirmDelete = true }, onFile = { filing = true })
                 } else {
-                    FolderTitle(vm, onFolders = { folders = true })
+                    FolderTitle(vm, onFolders = {
+                        vm.revealCurrentFolder()
+                        folders = true
+                    })
                 }
             }
             if (!isDrafts) {

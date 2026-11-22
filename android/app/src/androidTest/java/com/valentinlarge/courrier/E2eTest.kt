@@ -515,8 +515,18 @@ class E2eTest {
         rule.onNodeWithTag("nom-dossier").performTextInput("Clients/Affiches")
         rule.onNodeWithText("Créer").performClick()
         rule.waitUntil(30_000) { vm.labels.size == 2 && !vm.labelBusy }
+        // Le sous-dossier tout juste créé se montre : son parent s'est déplié.
         waitText("Affiches")
         shot("16c-dossiers")
+        // Sans rien toucher, les sous-dossiers sont repliés ; le chevron du parent les replie et les déplie.
+        val folded = folderRows(labelTree(vm.labels), emptySet())
+        assertTrue("au départ, un sous-dossier est replié sous son parent", folded.size == 2 && folded[0].parent && !folded[0].open && !folded[1].visible)
+        rule.onNodeWithTag("deplier-Clients").performScrollTo().performClick()
+        rule.waitUntil(15_000) { rule.onAllNodesWithTag("dossier-Clients/Affiches").fetchSemanticsNodes().isEmpty() }
+        assertTrue("le choix est gardé", vm.prefs.openFolders.isEmpty())
+        shot("16c2-dossiers-replies")
+        rule.onNodeWithTag("deplier-Clients").performClick()
+        rule.waitUntil(15_000) { rule.onAllNodesWithTag("dossier-Clients/Affiches").fetchSemanticsNodes().isNotEmpty() }
         instrumentation.uiAutomation.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
         waitGone("Nouveau dossier")
 

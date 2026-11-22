@@ -1,5 +1,8 @@
 package com.valentinlarge.courrier
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -15,6 +18,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -41,8 +45,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextOverflow
@@ -94,10 +100,7 @@ fun FoldersSheet(vm: MainViewModel, onClose: () -> Unit) {
             Box(Modifier.padding(top = 10.dp, bottom = 6.dp).size(40.dp, 4.dp).clip(RoundedCornerShape(2.dp)).background(Line))
         },
     ) {
-        Column(
-            Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(start = 12.dp, end = 12.dp, bottom = 28.dp),
-            verticalArrangement = Arrangement.spacedBy(2.dp),
-        ) {
+        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(start = 12.dp, end = 12.dp, bottom = 28.dp)) {
             FOLDERS.forEach { folder ->
                 SheetLine(
                     glyph = SYSTEM_GLYPHS[folder.id] ?: Glyphs.Folder,
@@ -113,22 +116,27 @@ fun FoldersSheet(vm: MainViewModel, onClose: () -> Unit) {
             vm.labelError?.let {
                 Text(it, modifier = Modifier.padding(start = 12.dp, end = 12.dp, bottom = 8.dp), color = Red, fontWeight = FontWeight.Medium)
             }
-            val tree = labelTree(vm.labels)
-            if (tree.isEmpty()) {
+            // Les sous-dossiers sont repliés au départ : le chevron de leur parent les déplie.
+            val rows = folderRows(labelTree(vm.labels), vm.openFolders)
+            if (rows.isEmpty()) {
                 Text("Aucun dossier pour l'instant.", modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp), color = Muted)
             }
-            tree.forEach { node ->
-                FolderLine(
-                    node,
-                    selected = node.label.id == current,
-                    onOpen = { pick(labelKey(node.label.id)) },
-                    onRename = { renaming = node.label },
-                    onDelete = { deleting = node.label },
-                )
+            rows.forEach { row ->
+                AnimatedVisibility(visible = row.visible) {
+                    FolderLine(
+                        row,
+                        selected = row.node.label.id == current,
+                        onOpen = { pick(labelKey(row.node.label.id)) },
+                        onToggle = { vm.toggleFolder(row.node.label.id) },
+                        onRename = { renaming = row.node.label },
+                        onDelete = { deleting = row.node.label },
+                    )
+                }
             }
             Row(
                 Modifier
                     .fillMaxWidth()
+                    .padding(vertical = 1.dp)
                     .clip(RoundedCornerShape(14.dp))
                     .clickable(enabled = !vm.labelBusy) { creating = true }
                     .testTag("nouveau-dossier")
@@ -141,9 +149,9 @@ fun FoldersSheet(vm: MainViewModel, onClose: () -> Unit) {
                 Text("Nouveau dossier", color = Blue, fontWeight = FontWeight.SemiBold)
             }
 
-            // Avec une seule boîte, il n'y a rien à trier.
-            if (vm.boxes.size > 1) {
-                SheetHeading("Boîtes", "Le courrier reçu par chaque adresse, où qu'il soit rangé.")
+            // Toutes les boîtes connues : les adresses du domaine, même sans courrier, et les comptes extérieurs.
+            if (vm.boxes.isNotEmpty()) {
+                SheetHeading("Boîtes", "Le courrier reçu par chaque adresse, où qu'il soit rangé. Un compte Gmail apparaît dès que son courrier arrive ici.")
                 vm.boxes.forEach { box ->
                     val what = when (box.kind) {
                         "main" -> "adresse principale"
@@ -234,7 +242,27 @@ private fun Counts(unread: Int, total: Int?) {
     }
 }
 
-/** Une ligne du panneau : un pictogramme, un nom, ses compteurs. Celle qu'on regarde est teintée. */
+/** Le chevron d'un dossier qui en contient d'autres : on le touche pour les déplier ou les replier. */
+@Composable
+private fun Disclosure(name: String, open: Boolean, tint: Color, onToggle: () -> Unit, width: Dp = 46.dp) {
+    val turn by animateFloatAsState(if (open) 90f else 0f, tween(220, easing = Glide), label = "chevron")
+    Box(
+        Modifier.size(width, 46.dp).clip(CircleShape).clickable(role = Role.Button, onClick = onToggle).testTag("deplier-$name"),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            Glyphs.ChevronRight,
+            contentDescription = if (open) "Replier les sous-dossiers de $name" else "Déplier les sous-dossiers de $name",
+            tint = tint,
+            modifier = Modifier.size(20.dp).graphicsLayer { rotationZ = turn },
+        )
+    }
+}
+
+/**
+ * Une ligne du panneau : un pictogramme, un nom, ses compteurs. Celle qu'on regarde est teintée.
+ * [leading], s'il est donné, prend la place du pictogramme (le chevron d'un dossier qui en contient d'autres).
+ */
 @Composable
 private fun SheetLine(
     glyph: ImageVector,
@@ -246,21 +274,30 @@ private fun SheetLine(
     unread: Int = 0,
     total: Int? = null,
     indent: Dp = 0.dp,
+    leading: @Composable (() -> Unit)? = null,
     trailing: @Composable (() -> Unit)? = null,
 ) {
     Row(
         Modifier
             .fillMaxWidth()
+            .padding(vertical = 1.dp)
             .clip(RoundedCornerShape(14.dp))
             .background(if (selected) BlueWash else Color.Transparent)
             .clickable(onClick = onClick)
             .then(modifier)
             .heightIn(min = 50.dp)
-            .padding(start = 12.dp + indent, end = if (trailing != null) 0.dp else 12.dp),
+            .padding(start = indent, end = if (trailing != null) 0.dp else 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Icon(glyph, contentDescription = null, tint = if (selected) Blue else Ink, modifier = Modifier.size(22.dp))
-        Spacer(Modifier.width(14.dp))
+        // Chevron ou pictogramme, le nom commence au même endroit.
+        if (leading != null) {
+            leading()
+            Spacer(Modifier.width(2.dp))
+        } else {
+            Spacer(Modifier.width(12.dp))
+            Icon(glyph, contentDescription = null, tint = if (selected) Blue else Ink, modifier = Modifier.size(22.dp))
+            Spacer(Modifier.width(14.dp))
+        }
         Column(Modifier.weight(1f).padding(vertical = 6.dp)) {
             Text(
                 title,
@@ -278,18 +315,31 @@ private fun SheetLine(
 }
 
 @Composable
-private fun FolderLine(node: LabelNode, selected: Boolean, onOpen: () -> Unit, onRename: () -> Unit, onDelete: () -> Unit) {
+private fun FolderLine(
+    row: FolderRow,
+    selected: Boolean,
+    onOpen: () -> Unit,
+    onToggle: () -> Unit,
+    onRename: () -> Unit,
+    onDelete: () -> Unit,
+) {
     var menu by remember { mutableStateOf(false) }
+    val node = row.node
     val label = node.label
     SheetLine(
         glyph = Glyphs.Folder,
         title = node.short,
         selected = selected,
-        unread = label.unread,
+        unread = row.unread,
         total = label.total,
         indent = (node.depth * 18).dp,
         onClick = onOpen,
         modifier = Modifier.testTag("dossier-${label.name}"),
+        leading = if (row.parent) {
+            { Disclosure(label.name, row.open, if (selected) Blue else Muted, onToggle) }
+        } else {
+            null
+        },
         trailing = {
             Box {
                 GlyphButton(Glyphs.More, "Actions sur le dossier ${label.name}", onClick = { menu = true }, tint = Muted)
@@ -352,33 +402,42 @@ fun FilePicker(vm: MainViewModel, current: List<String>, onDismiss: () -> Unit, 
         title = { Text("Ranger dans…") },
         text = {
             Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState())) {
-                val tree = labelTree(vm.labels)
-                if (tree.isEmpty()) {
+                val rows = folderRows(labelTree(vm.labels), vm.openFolders)
+                if (rows.isEmpty()) {
                     Text("Aucun dossier pour l'instant. Crées-en un en touchant le titre de la page du courrier.", color = Muted)
                 }
-                tree.forEach { node ->
+                rows.forEach { row ->
+                    val node = row.node
                     val filed = node.label.id in current
-                    Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(12.dp))
-                            .clickable { onPick(node.label) }
-                            .testTag("ranger-${node.label.name}")
-                            .padding(start = (node.depth * 18).dp, top = 12.dp, bottom = 12.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Icon(Glyphs.Folder, contentDescription = null, tint = if (filed) Blue else Muted, modifier = Modifier.size(20.dp))
-                        Spacer(Modifier.width(12.dp))
-                        Text(
-                            node.short,
-                            modifier = Modifier.weight(1f),
-                            color = if (filed) Blue else Ink,
-                            fontWeight = if (filed) FontWeight.SemiBold else FontWeight.Normal,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                        if (filed) {
-                            Icon(Glyphs.Check, contentDescription = "Déjà rangé ici : toucher pour l'en sortir", tint = Blue)
+                    AnimatedVisibility(visible = row.visible) {
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .clickable { onPick(node.label) }
+                                .testTag("ranger-${node.label.name}")
+                                .heightIn(min = 46.dp)
+                                .padding(start = (node.depth * 18).dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            if (row.parent) {
+                                Disclosure(node.label.name, row.open, if (filed) Blue else Muted, { vm.toggleFolder(node.label.id) }, width = 40.dp)
+                            } else {
+                                Spacer(Modifier.width(10.dp))
+                                Icon(Glyphs.Folder, contentDescription = null, tint = if (filed) Blue else Muted, modifier = Modifier.size(20.dp))
+                                Spacer(Modifier.width(10.dp))
+                            }
+                            Text(
+                                node.short,
+                                modifier = Modifier.weight(1f),
+                                color = if (filed) Blue else Ink,
+                                fontWeight = if (filed) FontWeight.SemiBold else FontWeight.Normal,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            if (filed) {
+                                Icon(Glyphs.Check, contentDescription = "Déjà rangé ici : toucher pour l'en sortir", tint = Blue)
+                            }
                         }
                     }
                 }
