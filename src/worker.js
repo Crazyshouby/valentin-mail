@@ -20,6 +20,13 @@ const ATTACHMENT_LINK_MS = 6 * 3600 * 1000;
 const ORPHAN_UPLOAD_MS = 24 * 3600 * 1000;
 const THREAD_WINDOW_MS = 60 * 24 * 3600 * 1000; // au-delà, un même objet ouvre une nouvelle conversation
 const MAX_BATCH = 100;
+const BATCH_SLICE = 80;
+const MAX_LABELS = 200;
+// La base gratuite accepte 100 000 écritures par jour, puis refuse tout jusqu'à minuit UTC — y compris
+// le courrier qui arrive. Les travaux de masse (import, indexation) s'arrêtent donc bien avant.
+const DAILY_WRITE_CAP = 60000;
+const IMPORT_MAX_BYTES = 40 * 1024 * 1024;
+const HEAD_BYTES = 128 * 1024;
 
 export default {
   async email(message, env, ctx) {
@@ -59,7 +66,7 @@ async function receive(message, env) {
   try {
     const [found, rules] = await env.DB.batch([
       env.DB.prepare("SELECT enabled FROM aliases WHERE address = ?1").bind(recipient),
-      env.DB.prepare("SELECT field, value, action FROM rules ORDER BY created"),
+      env.DB.prepare("SELECT field, value, action, target FROM rules ORDER BY created"),
     ]);
     alias = (found.results || [])[0] || null;
     rule = matchRule(rules.results || [], { from: `${from.name} ${from.address}`, to: recipient, subject });
@@ -74,7 +81,9 @@ async function receive(message, env) {
     message.setReject("Message refusé par le destinataire.");
     return;
   }
-  const folder = rule && rule.action === "archive" ? "archive" : rule && rule.action === "trash" ? "trash" : "inbox";
+  // « file » range dans un dossier sans passer par la réception ; « label » range et laisse en réception.
+  const skipInbox = rule && (rule.action === "archive" || rule.action === "file");
+  const folder = skipInbox ? "archive" : rule && rule.action === "trash" ? "trash" : "inbox";
   const read = rule && rule.action === "read" ? 1 : 0;
 
   const id = crypto.randomUUID();
@@ -119,6 +128,13 @@ async function receive(message, env) {
     // l'erreur remonter pour que l'expéditeur reçoive un avis d'échec.
     await env.MAIL_BUCKET.delete(key).catch(() => {});
     throw err;
+  }
+
+  if (rule && (rule.action === "label" || rule.action === "file") && rule.target) {
+    await env.DB.prepare("INSERT OR IGNORE INTO message_labels (message_id, label_id) SELECT ?1, id FROM labels WHERE id = ?2")
+      .bind(id, rule.target)
+      .run()
+      .catch((err) => console.error("Message non rangé dans son dossier :", err));
   }
 
   // Toute adresse qui reçoit du courrier apparaît dans la liste des adresses, où l'on peut la couper.
@@ -223,9 +239,10 @@ const tidyText = (text) => String(text || "").replace(/\s+/g, " ").trim().slice(
 
 // Indexe quelques messages pas encore passés par là ; renvoie combien il en reste.
 async function indexSome(env, limit) {
-  const rows = await env.DB.prepare("SELECT id, r2_key FROM messages WHERE indexed = 0 ORDER BY date DESC LIMIT ?1")
+  const rows = await env.DB.prepare("SELECT rowid AS n, id, r2_key FROM messages WHERE indexed = 0 ORDER BY date DESC LIMIT ?1")
     .bind(limit)
     .all();
+  const statements = [];
   for (const row of rows.results || []) {
     let text = "";
     try {
@@ -237,13 +254,13 @@ async function indexSome(env, limit) {
     } catch (err) {
       console.error("Texte illisible pour la recherche :", row.id, err);
     }
-    await env.DB.batch([
-      env.DB.prepare("DELETE FROM messages_fts WHERE id = ?1").bind(row.id),
-      env.DB.prepare("INSERT INTO messages_fts (id, body) VALUES (?1, ?2)").bind(row.id, text),
-      env.DB.prepare("UPDATE messages SET indexed = 1 WHERE id = ?1").bind(row.id),
-    ]);
+    statements.push(
+      env.DB.prepare("INSERT OR REPLACE INTO messages_fts (rowid, id, body) VALUES (?1, ?2, ?3)").bind(row.n, row.id, text),
+      env.DB.prepare("UPDATE messages SET indexed = 1 WHERE id = ?1").bind(row.id)
+    );
   }
-  if (!(rows.results || []).length) return 0;
+  if (!statements.length) return 0;
+  await spend(env, rowsWritten(await env.DB.batch(statements)));
   const left = await env.DB.prepare("SELECT COUNT(*) AS n FROM messages WHERE indexed = 0").first();
   return left ? left.n : 0;
 }
@@ -252,6 +269,42 @@ async function indexSome(env, limit) {
 function searchQuery(q) {
   const words = (q.toLowerCase().match(/[\p{L}\p{N}]+/gu) || []).slice(0, 6);
   return words.length ? words.map((w) => `"${w}"*`).join(" ") : "";
+}
+
+// Indexation demandée par la page d'import : quelques messages par appel, tant que le budget du jour le permet.
+async function runIndex(request, env) {
+  const body = (await readJson(request)) || {};
+  const limit = Math.min(Math.max(Math.floor(Number(body.limit)) || 2, 1), 4);
+  if (limit > 2 && (await spent(env)) >= DAILY_WRITE_CAP) return json({ error: QUOTA_REACHED, retry: nextReset() }, 429);
+  return json({ ok: true, remaining: await indexSome(env, limit) });
+}
+
+// ------------------------------------------------ budget d'écritures du jour
+
+const QUOTA_REACHED = "Le quota d'écritures du jour est atteint : la suite reprendra après minuit (heure universelle).";
+const dayKey = (now = Date.now()) => "writes:" + new Date(now).toISOString().slice(0, 10);
+const nextReset = (now = Date.now()) => Date.UTC(new Date(now).getUTCFullYear(), new Date(now).getUTCMonth(), new Date(now).getUTCDate() + 1);
+
+// Lignes écrites par une ou plusieurs requêtes, telles que la base les compte.
+function rowsWritten(results) {
+  return (Array.isArray(results) ? results : [results]).reduce((n, r) => n + ((r && r.meta && r.meta.rows_written) || 0), 0);
+}
+
+async function spend(env, rows) {
+  if (!(rows > 0)) return;
+  const now = Date.now();
+  await env.DB.prepare(
+    `INSERT INTO cache (key, value, expires) VALUES (?1, ?2, ?3)
+     ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + ?2`
+  )
+    .bind(dayKey(now), rows + 1, now + 3 * 24 * 3600 * 1000)
+    .run()
+    .catch((err) => console.error("Compteur d'écritures non tenu :", err));
+}
+
+async function spent(env) {
+  const row = await env.DB.prepare("SELECT value FROM cache WHERE key = ?1").bind(dayKey()).first();
+  return row ? Number(row.value) || 0 : 0;
 }
 
 // ------------------------------------------------------------- réglages
@@ -273,7 +326,16 @@ async function saveSettings(request, env) {
       .bind(body.signature.replace(/\r\n/g, "\n").trim().slice(0, 2000))
       .run();
   }
-  return json({ ok: true, signature: (await readSettings(env)).signature || "" });
+  // Identifiant du « client OAuth » créé dans Google Cloud pour l'import Gmail. Ce n'est pas un secret.
+  if (typeof body.google_client_id === "string") {
+    const clientId = body.google_client_id.trim();
+    if (clientId && !/^[0-9]{6,20}-[a-z0-9]{10,60}\.apps\.googleusercontent\.com$/.test(clientId)) {
+      return json({ error: "Cet identifiant ne ressemble pas à un identifiant client Google (il finit par .apps.googleusercontent.com)." }, 400);
+    }
+    await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('google_client_id', ?1)").bind(clientId).run();
+  }
+  const saved = await readSettings(env);
+  return json({ ok: true, signature: saved.signature || "", google_client_id: saved.google_client_id || "" });
 }
 
 // ------------------------------------------------- notifications poussées
@@ -409,7 +471,8 @@ async function saveDevice(request, env, remove) {
 
 const ADDRESS = /^[a-z0-9._+-]{1,64}@[a-z0-9.-]{1,255}$/;
 const RULE_FIELDS = ["from", "to", "subject"];
-const RULE_ACTIONS = ["archive", "trash", "read", "block"];
+const RULE_ACTIONS = ["archive", "trash", "read", "block", "label", "file"];
+const UUID = /^[0-9a-f-]{36}$/;
 const MAX_RULES = 100;
 
 const mainAddress = (env) => parseAddress(env.MAIL_FROM || "").address.toLowerCase();
@@ -478,7 +541,7 @@ async function deleteAlias(rawAddress, env) {
 }
 
 async function listRules(env) {
-  const rows = await env.DB.prepare("SELECT id, field, value, action FROM rules ORDER BY created").all();
+  const rows = await env.DB.prepare("SELECT id, field, value, action, target FROM rules ORDER BY created").all();
   return json({ rules: rows.results || [] });
 }
 
@@ -488,13 +551,20 @@ async function saveRule(id, request, env) {
   const value = String(body.value || "").replace(/[\r\n]+/g, " ").trim().slice(0, 200);
   if (!RULE_FIELDS.includes(body.field) || !RULE_ACTIONS.includes(body.action)) return json({ error: "Règle inconnue." }, 400);
   if (!value) return json({ error: "Indique le texte à repérer." }, 400);
+  // Ranger dans un dossier : il faut dire lequel, et qu'il existe.
+  let target = null;
+  if (body.action === "label" || body.action === "file") {
+    target = typeof body.target === "string" && UUID.test(body.target) ? body.target : null;
+    const found = target ? await env.DB.prepare("SELECT id FROM labels WHERE id = ?1").bind(target).first() : null;
+    if (!found) return json({ error: "Choisis le dossier où ranger ces messages." }, 400);
+  }
   const existing = await env.DB.prepare("SELECT created FROM rules WHERE id = ?1").bind(id).first();
   if (!existing) {
     const count = await env.DB.prepare("SELECT COUNT(*) AS n FROM rules").first();
     if (count && count.n >= MAX_RULES) return json({ error: `Pas plus de ${MAX_RULES} règles.` }, 400);
   }
-  await env.DB.prepare("INSERT OR REPLACE INTO rules (id, field, value, action, created) VALUES (?1, ?2, ?3, ?4, ?5)")
-    .bind(id, body.field, value, body.action, existing ? existing.created : Date.now())
+  await env.DB.prepare("INSERT OR REPLACE INTO rules (id, field, value, action, target, created) VALUES (?1, ?2, ?3, ?4, ?5, ?6)")
+    .bind(id, body.field, value, body.action, target, existing ? existing.created : Date.now())
     .run();
   return json({ ok: true });
 }
@@ -578,7 +648,11 @@ async function route(request, env) {
   if (path === "/api/drafts" && method === "GET") return listDrafts(env);
   if (path === "/api/push/test" && method === "POST") return testPush(env);
   if (path === "/api/settings" && method === "PUT") return saveSettings(request, env);
-  if (path === "/api/index" && method === "POST") return json({ ok: true, remaining: await indexSome(env, 2) });
+  if (path === "/api/index" && method === "POST") return runIndex(request, env);
+  if (path === "/api/labels" && method === "GET") return listLabels(env);
+  if (path === "/api/import/status" && method === "GET") return importStatus(env);
+  if (path === "/api/import/check" && method === "POST") return importCheck(request, env);
+  if (path === "/api/import/undo" && method === "POST") return importUndo(request, env);
   if (path === "/api/devices" && (method === "PUT" || method === "DELETE")) return saveDevice(request, env, method === "DELETE");
   if (path === "/api/aliases" && method === "GET") return listAliases(env);
   if (path === "/api/rules" && method === "GET") return listRules(env);
@@ -594,6 +668,15 @@ async function route(request, env) {
     if (method === "PUT") return saveRule(rule[1], request, env);
     if (method === "DELETE") return deleteRule(rule[1], env);
   }
+
+  const label = path.match(/^\/api\/labels\/([0-9a-f-]{36})$/);
+  if (label) {
+    if (method === "PUT") return saveLabel(label[1], request, env);
+    if (method === "DELETE") return deleteLabel(label[1], env);
+  }
+
+  const imported = path.match(/^\/api\/import\/messages\/([0-9a-f]{6,32})$/);
+  if (imported && method === "PUT") return importMessage(imported[1], request, url, env);
 
   const draft = path.match(/^\/api\/drafts\/([0-9a-f-]{36})$/);
   if (draft) {
@@ -741,6 +824,14 @@ function readCookie(request, name) {
 const LIST_COLUMNS =
   "id, folder, direction, from_addr, from_name, to_addr, subject, message_id, date, size, is_read, thread_id";
 
+// Dossiers personnels où le message est rangé (leurs identifiants).
+const LABEL_IDS = "(SELECT group_concat(label_id) FROM message_labels ml WHERE ml.message_id = messages.id) AS labels";
+
+function withLabels(row) {
+  if (row) row.labels = row.labels ? String(row.labels).split(",") : [];
+  return row;
+}
+
 // Nombre de messages de la même conversation, tous dossiers confondus sauf la corbeille.
 const THREAD_COUNT =
   "(SELECT COUNT(*) FROM messages t WHERE t.thread_id = messages.thread_id AND t.folder != 'trash') AS thread_count";
@@ -790,23 +881,28 @@ async function findThread(env, { refs, subject, correspondent }) {
 
 async function listThread(id, env) {
   const rows = await env.DB.prepare(
-    `SELECT ${LIST_COLUMNS} FROM messages WHERE thread_id = ?1 AND folder != 'trash' ORDER BY date ASC LIMIT 200`
+    `SELECT ${LIST_COLUMNS}, ${LABEL_IDS} FROM messages WHERE thread_id = ?1 AND folder != 'trash' ORDER BY date ASC LIMIT 200`
   )
     .bind(id)
     .all();
-  return json({ messages: rows.results || [] });
+  return json({ messages: (rows.results || []).map(withLabels) });
 }
 
 async function listMessages(url, env) {
   const folder = url.searchParams.get("folder") || "inbox";
   if (!FOLDERS.includes(folder)) return json({ error: "Dossier inconnu." }, 400);
+  // Un dossier personnel montre ce qu'on y a rangé, où que ce soit par ailleurs — sauf la corbeille.
+  const label = url.searchParams.get("label") || "";
+  if (label && !UUID.test(label)) return json({ error: "Dossier inconnu." }, 400);
 
   const q = (url.searchParams.get("q") || "").trim().slice(0, 100);
   const before = Number(url.searchParams.get("before")) || 0;
   const after = Number(url.searchParams.get("after")) || 0;
 
-  const where = ["folder = ?"];
-  const params = [folder];
+  const where = label
+    ? ["id IN (SELECT message_id FROM message_labels WHERE label_id = ?)", "folder != 'trash'"]
+    : ["folder = ?"];
+  const params = [label || folder];
   if (before > 0) {
     where.push("date < ?");
     params.push(before);
@@ -830,12 +926,12 @@ async function listMessages(url, env) {
 
   const [list, unread] = await env.DB.batch([
     env.DB.prepare(
-      `SELECT ${LIST_COLUMNS}, ${THREAD_COUNT} FROM messages WHERE ${where.join(" AND ")} ORDER BY date DESC LIMIT ${PAGE_SIZE + 1}`
+      `SELECT ${LIST_COLUMNS}, ${LABEL_IDS}, ${THREAD_COUNT} FROM messages WHERE ${where.join(" AND ")} ORDER BY date DESC LIMIT ${PAGE_SIZE + 1}`
     ).bind(...params),
     env.DB.prepare("SELECT COUNT(*) AS n FROM messages WHERE folder = 'inbox' AND is_read = 0"),
   ]);
 
-  const rows = list.results || [];
+  const rows = (list.results || []).map(withLabels);
   const hasMore = rows.length > PAGE_SIZE;
   return json({
     messages: hasMore ? rows.slice(0, PAGE_SIZE) : rows,
@@ -845,7 +941,7 @@ async function listMessages(url, env) {
 }
 
 async function findMessage(id, env) {
-  return env.DB.prepare(`SELECT ${LIST_COLUMNS}, r2_key FROM messages WHERE id = ?1`).bind(id).first();
+  return withLabels(await env.DB.prepare(`SELECT ${LIST_COLUMNS}, ${LABEL_IDS}, r2_key FROM messages WHERE id = ?1`).bind(id).first());
 }
 
 async function getMessage(id, env) {
@@ -911,12 +1007,23 @@ async function deleteMessage(id, env) {
   await env.MAIL_BUCKET.delete([row.r2_key, ...(files.results || []).map((f) => `uploads/${f.id}`)]);
   await env.DB.batch([
     env.DB.prepare("DELETE FROM uploads WHERE message_id = ?1").bind(id),
+    ...forgetStatements(env, [id]),
     env.DB.prepare("DELETE FROM messages WHERE id = ?1").bind(id),
   ]);
   return json({ ok: true, deleted: true });
 }
 
-// Une même action sur plusieurs messages à la fois : lu ou non lu, changement de dossier, suppression.
+// Ce qui accompagne un message qu'on efface pour de bon : son texte dans l'index de recherche et ses
+// rangements. À placer avant l'effacement du message lui-même, dont l'index a besoin pour se repérer.
+function forgetStatements(env, ids) {
+  const marks = ids.map(() => "?").join(",");
+  return [
+    env.DB.prepare(`DELETE FROM messages_fts WHERE rowid IN (SELECT rowid FROM messages WHERE id IN (${marks}))`).bind(...ids),
+    env.DB.prepare(`DELETE FROM message_labels WHERE message_id IN (${marks})`).bind(...ids),
+  ];
+}
+
+// Une même action sur plusieurs messages à la fois : lu ou non lu, changement de dossier, rangement, suppression.
 async function batchMessages(request, env) {
   const body = await readJson(request);
   if (!body || !Array.isArray(body.ids)) return json({ error: "Requête illisible." }, 400);
@@ -924,6 +1031,19 @@ async function batchMessages(request, env) {
   if (!ids.length) return json({ ok: true, changed: 0, deleted: 0 });
   if (ids.length > MAX_BATCH) return json({ error: `Pas plus de ${MAX_BATCH} messages à la fois.` }, 400);
   if (ids.some((id) => !/^[0-9a-f-]{36}$/.test(id))) return json({ error: "Message invalide." }, 400);
+  // La base n'accepte qu'une centaine de valeurs par requête : on avance par tranches.
+  let changed = 0;
+  let deleted = 0;
+  for (let i = 0; i < ids.length; i += BATCH_SLICE) {
+    const part = await batchSlice(ids.slice(i, i + BATCH_SLICE), body, env);
+    if (part.error) return json({ error: part.error }, part.status);
+    changed += part.changed;
+    deleted += part.deleted;
+  }
+  return json({ ok: true, changed, deleted });
+}
+
+async function batchSlice(ids, body, env) {
   const marks = ids.map(() => "?").join(",");
 
   if (body.delete === true) {
@@ -943,10 +1063,11 @@ async function batchMessages(request, env) {
       await env.MAIL_BUCKET.delete([...gone.map((r) => r.r2_key), ...(files.results || []).map((f) => `uploads/${f.id}`)]);
       await env.DB.batch([
         env.DB.prepare(`DELETE FROM uploads WHERE message_id IN (${goneMarks})`).bind(...goneIds),
+        ...forgetStatements(env, goneIds),
         env.DB.prepare(`DELETE FROM messages WHERE id IN (${goneMarks})`).bind(...goneIds),
       ]);
     }
-    return json({ ok: true, changed: toTrash.length, deleted: gone.length });
+    return { changed: toTrash.length, deleted: gone.length };
   }
 
   const sets = [];
@@ -956,15 +1077,319 @@ async function batchMessages(request, env) {
     params.push(body.is_read ? 1 : 0);
   }
   if (typeof body.folder === "string") {
-    if (!FOLDERS.includes(body.folder)) return json({ error: "Dossier inconnu." }, 400);
+    if (!FOLDERS.includes(body.folder)) return { error: "Dossier inconnu.", status: 400 };
     sets.push("folder = ?");
     params.push(body.folder);
   }
-  if (!sets.length) return json({ error: "Rien à modifier." }, 400);
-  const result = await env.DB.prepare(`UPDATE messages SET ${sets.join(", ")} WHERE id IN (${marks})`)
-    .bind(...params, ...ids)
-    .run();
-  return json({ ok: true, changed: result.meta ? result.meta.changes : 0, deleted: 0 });
+
+  // Rangement : ajouter ou retirer des dossiers personnels ; « leave_inbox » sort de la réception ce qu'on range.
+  const idList = (value) => (Array.isArray(value) ? [...new Set(value.map(String))] : []);
+  const add = idList(body.add_labels);
+  const remove = idList(body.remove_labels);
+  if ([...add, ...remove].some((l) => !UUID.test(l)) || add.length + remove.length > 20) {
+    return { error: "Dossier inconnu.", status: 400 };
+  }
+  if (add.length) {
+    const found = await env.DB.prepare(`SELECT id FROM labels WHERE id IN (${add.map(() => "?").join(",")})`).bind(...add).all();
+    if ((found.results || []).length !== add.length) return { error: "Ce dossier n'existe plus.", status: 404 };
+  }
+
+  const statements = [];
+  if (sets.length) {
+    statements.push(env.DB.prepare(`UPDATE messages SET ${sets.join(", ")} WHERE id IN (${marks})`).bind(...params, ...ids));
+  }
+  for (const l of add) {
+    statements.push(
+      env.DB.prepare(`INSERT OR IGNORE INTO message_labels (message_id, label_id) SELECT id, ? FROM messages WHERE id IN (${marks})`).bind(l, ...ids)
+    );
+  }
+  for (const l of remove) {
+    statements.push(env.DB.prepare(`DELETE FROM message_labels WHERE label_id = ? AND message_id IN (${marks})`).bind(l, ...ids));
+  }
+  if (body.leave_inbox === true) {
+    statements.push(env.DB.prepare(`UPDATE messages SET folder = 'archive' WHERE folder = 'inbox' AND id IN (${marks})`).bind(...ids));
+  }
+  if (!statements.length) return { error: "Rien à modifier.", status: 400 };
+  const results = await env.DB.batch(statements);
+  const changed = Math.max(0, ...results.map((r) => (r.meta ? r.meta.changes || 0 : 0)));
+  return { changed, deleted: 0 };
+}
+
+// ------------------------------------------------------ dossiers personnels
+
+// Un nom de dossier propre : « Parent/Enfant » pour un sous-dossier, cinq niveaux au plus.
+function cleanLabelName(value) {
+  const parts = String(value || "")
+    .replace(/[\u0000-\u001f\u007f\u202a-\u202e\u2066-\u2069]/g, "")
+    .split("/")
+    .map((p) => p.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+  if (!parts.length || parts.length > 5 || parts.some((p) => p.length > 60)) return "";
+  return parts.join("/");
+}
+
+async function listLabels(env) {
+  const rows = await env.DB.prepare(
+    `SELECT l.id, l.name, COUNT(m.id) AS total, COALESCE(SUM(m.is_read = 0), 0) AS unread
+     FROM labels l
+     LEFT JOIN message_labels ml ON ml.label_id = l.id
+     LEFT JOIN messages m ON m.id = ml.message_id AND m.folder != 'trash'
+     GROUP BY l.id ORDER BY l.name COLLATE NOCASE`
+  ).all();
+  return json({ labels: rows.results || [] });
+}
+
+// Crée un dossier, ou le renomme ; ses sous-dossiers suivent le nouveau nom.
+async function saveLabel(id, request, env) {
+  const body = await readJson(request);
+  const name = cleanLabelName(body && body.name);
+  if (!name) return json({ error: "Donne un nom au dossier : 60 caractères au plus, et « / » pour un sous-dossier." }, 400);
+  const [own, clash, count] = await env.DB.batch([
+    env.DB.prepare("SELECT name FROM labels WHERE id = ?1").bind(id),
+    env.DB.prepare("SELECT id FROM labels WHERE name = ?1 COLLATE NOCASE AND id != ?2").bind(name, id),
+    env.DB.prepare("SELECT COUNT(*) AS n FROM labels"),
+  ]);
+  if ((clash.results || []).length) return json({ error: "Un dossier porte déjà ce nom." }, 409);
+  const existing = (own.results || [])[0];
+  if (!existing) {
+    if (count.results[0].n >= MAX_LABELS) return json({ error: `Pas plus de ${MAX_LABELS} dossiers.` }, 400);
+    await env.DB.prepare("INSERT INTO labels (id, name, source, created) VALUES (?1, ?2, NULL, ?3)").bind(id, name, Date.now()).run();
+  } else if (existing.name !== name) {
+    const prefix = existing.name.replace(/[\\%_]/g, "\\$&") + "/%";
+    try {
+      await env.DB.batch([
+        env.DB.prepare("UPDATE labels SET name = ?1 || substr(name, ?2) WHERE name LIKE ?3 ESCAPE '\\'").bind(name, existing.name.length + 1, prefix),
+        env.DB.prepare("UPDATE labels SET name = ?1 WHERE id = ?2").bind(name, id),
+      ]);
+    } catch (err) {
+      console.error("Dossier non renommé :", err);
+      return json({ error: "Un sous-dossier porterait le même nom qu'un dossier existant." }, 409);
+    }
+  }
+  return json({ ok: true, id, name });
+}
+
+// Efface le dossier, pas les messages : ils restent là où ils sont par ailleurs.
+async function deleteLabel(id, env) {
+  await env.DB.batch([
+    env.DB.prepare("DELETE FROM message_labels WHERE label_id = ?1").bind(id),
+    env.DB.prepare("DELETE FROM rules WHERE target = ?1").bind(id),
+    env.DB.prepare("DELETE FROM labels WHERE id = ?1").bind(id),
+  ]);
+  return json({ ok: true });
+}
+
+// ------------------------------------------------- import d'une autre boîte
+
+const IMPORT_SOURCE = /^gmail:[a-z0-9._+-]{1,64}@[a-z0-9.-]{1,255}$/;
+
+// Une conversation Gmail devient un identifiant de conversation de la même forme que les nôtres,
+// toujours le même pour une même conversation.
+function gmailThread(value) {
+  const hex = String(value || "").toLowerCase();
+  if (!/^[0-9a-f]{1,16}$/.test(hex)) return null;
+  const g = hex.padStart(16, "0");
+  return `00000000-0000-4000-${g.slice(0, 4)}-${g.slice(4)}`;
+}
+
+// Un en-tête écrit en UTF-8 sans encodage, lu octet par octet, retrouve ses accents.
+function utf8ish(value) {
+  if (!/[\u0080-\u00ff]/.test(value)) return value;
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(binaryBytes(value));
+  } catch {
+    return value;
+  }
+}
+
+// Les en-têtes d'un message brut (son début suffit).
+function rawHead(bytes) {
+  const text = binaryString(bytes);
+  const end = text.search(/\r?\n\r?\n/);
+  const map = new Map();
+  for (const line of (end < 0 ? text : text.slice(0, end)).replace(/\r?\n[ \t]+/g, " ").split(/\r?\n/)) {
+    const colon = line.indexOf(":");
+    if (colon < 1) continue;
+    const name = line.slice(0, colon).trim().toLowerCase();
+    if (!map.has(name)) map.set(name, utf8ish(line.slice(colon + 1).trim()));
+  }
+  return { get: (name) => map.get(name) || "" };
+}
+
+async function importStatus(env) {
+  const [imported, unindexed] = await env.DB.batch([
+    env.DB.prepare("SELECT COUNT(*) AS n FROM messages WHERE import_ref IS NOT NULL"),
+    env.DB.prepare("SELECT COUNT(*) AS n FROM messages WHERE indexed = 0"),
+    env.DB.prepare("DELETE FROM cache WHERE key LIKE 'writes:%' AND expires < ?1").bind(Date.now()),
+  ]);
+  return json({
+    ok: true,
+    imported: imported.results[0].n,
+    unindexed: unindexed.results[0].n,
+    used: await spent(env),
+    cap: DAILY_WRITE_CAP,
+    resets: nextReset(),
+    client_id: (await readSettings(env)).google_client_id || "",
+  });
+}
+
+// Lesquels de ces messages sont déjà là ? Évite de les retélécharger quand on reprend un import.
+async function importCheck(request, env) {
+  const body = await readJson(request);
+  const source = body && typeof body.source === "string" ? body.source.toLowerCase() : "";
+  const refs = body && Array.isArray(body.refs) ? [...new Set(body.refs.map(String))] : null;
+  if (!IMPORT_SOURCE.test(source) || !refs || refs.length > 450 || refs.some((r) => !/^[0-9a-f]{6,32}$/.test(r))) {
+    return json({ error: "Requête illisible." }, 400);
+  }
+  const known = [];
+  const statements = [];
+  for (let i = 0; i < refs.length; i += 90) {
+    const part = refs.slice(i, i + 90).map((r) => `${source}:${r}`);
+    statements.push(
+      env.DB.prepare(`SELECT import_ref FROM messages WHERE import_ref IN (${part.map(() => "?").join(",")})`).bind(...part)
+    );
+  }
+  if (statements.length) {
+    for (const result of await env.DB.batch(statements)) {
+      for (const row of result.results || []) known.push(row.import_ref.slice(source.length + 1));
+    }
+  }
+  return json({ ok: true, known });
+}
+
+// Reçoit un message tel qu'il existe dans l'autre boîte. Rien de ce qui accompagne une arrivée
+// normale ne se produit : ni notification, ni règle de tri, ni adresse créée. Le message garde sa
+// date, son état lu ou non lu, sa conversation et ses dossiers.
+async function importMessage(ref, request, url, env) {
+  const p = url.searchParams;
+  const source = (p.get("source") || "").toLowerCase();
+  if (!IMPORT_SOURCE.test(source)) return json({ error: "Origine de l'import invalide." }, 400);
+  const folder = p.get("folder") || "archive";
+  if (!["inbox", "sent", "archive"].includes(folder)) return json({ error: "Dossier inconnu." }, 400);
+  const date = Number(p.get("date"));
+  if (!(date > 0) || date > Date.now() + 24 * 3600 * 1000) return json({ error: "Date du message invalide." }, 400);
+  let names = [];
+  try {
+    names = JSON.parse(p.get("labels") || "[]");
+  } catch {
+    return json({ error: "Liste de dossiers illisible." }, 400);
+  }
+  names = [...new Set((Array.isArray(names) ? names : []).map(cleanLabelName).filter(Boolean))].slice(0, 20);
+
+  const length = Number(request.headers.get("Content-Length"));
+  if (!request.body || !(length > 0)) return json({ error: "Message vide ou de taille inconnue." }, 400);
+  if (length > IMPORT_MAX_BYTES) return json({ error: "Message trop lourd pour être importé." }, 413);
+  if ((await spent(env)) >= DAILY_WRITE_CAP) return json({ error: QUOTA_REACHED, retry: nextReset() }, 429);
+
+  const raw = await request.arrayBuffer();
+  const head = rawHead(new Uint8Array(raw, 0, Math.min(raw.byteLength, HEAD_BYTES)));
+  const messageId = head.get("message-id").slice(0, 500) || null;
+  const importRef = `${source}:${ref}`;
+  const thread = gmailThread(p.get("thread"));
+  const now = Date.now();
+
+  const [byRef, byId] = await env.DB.batch([
+    env.DB.prepare("SELECT id FROM messages WHERE import_ref = ?1").bind(importRef),
+    env.DB.prepare("SELECT id, thread_id, import_ref FROM messages WHERE message_id = ?1 ORDER BY date LIMIT 1").bind(messageId || ""),
+  ]);
+  if ((byRef.results || []).length) return json({ ok: true, status: "known", id: byRef.results[0].id });
+
+  // Les dossiers cités sont créés au besoin, puis le message y est rangé.
+  const filing = (messageRow) =>
+    names.flatMap((name) => [
+      env.DB.prepare("INSERT OR IGNORE INTO labels (id, name, source, created) VALUES (?1, ?2, ?3, ?4)").bind(crypto.randomUUID(), name, source, now),
+      env.DB.prepare("INSERT OR IGNORE INTO message_labels (message_id, label_id) SELECT ?1, id FROM labels WHERE name = ?2").bind(messageRow, name),
+    ]);
+
+  // Déjà là sous un autre jour — arrivé par le transfert automatique, par exemple : on ne le double pas.
+  // Il gagne seulement ses dossiers, et sa conversation rejoint celle de l'autre boîte.
+  const twin = messageId ? (byId.results || [])[0] : null;
+  if (twin) {
+    const statements = filing(twin.id);
+    if (thread && !twin.import_ref && twin.thread_id !== thread) {
+      statements.push(
+        twin.thread_id
+          ? env.DB.prepare("UPDATE messages SET thread_id = ?1 WHERE thread_id = ?2").bind(thread, twin.thread_id)
+          : env.DB.prepare("UPDATE messages SET thread_id = ?1 WHERE id = ?2").bind(thread, twin.id)
+      );
+    }
+    if (statements.length) await spend(env, rowsWritten(await env.DB.batch(statements)));
+    return json({ ok: true, status: "merged", id: twin.id });
+  }
+
+  const id = crypto.randomUUID();
+  const key = `raw/${id}.eml`;
+  await env.MAIL_BUCKET.put(key, raw, { httpMetadata: { contentType: "message/rfc822" } });
+
+  const out = folder === "sent";
+  const from = parseAddress(decodeMimeWords(head.get("from")));
+  const account = source.slice(source.indexOf(":") + 1);
+  const to = out ? parseRecipients(decodeMimeWords(head.get("to"))).list.join(", ") : account;
+  let results;
+  try {
+    results = await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO messages
+           (id, folder, direction, from_addr, from_name, to_addr, subject, message_id, date, size, is_read, r2_key, thread_id, indexed, source, import_ref)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 0, ?14, ?15)`
+      ).bind(
+        id,
+        folder,
+        out ? "out" : "in",
+        (from.address || (out ? account : "")).slice(0, 320),
+        from.name.slice(0, 200),
+        to.slice(0, 320),
+        decodeMimeWords(head.get("subject")).trim().slice(0, 500),
+        messageId,
+        date,
+        raw.byteLength,
+        out || p.get("read") !== "0" ? 1 : 0,
+        key,
+        thread || id,
+        source,
+        importRef
+      ),
+      ...filing(id),
+    ]);
+  } catch (err) {
+    await env.MAIL_BUCKET.delete(key).catch(() => {});
+    throw err;
+  }
+  await spend(env, rowsWritten(results));
+  return json({ ok: true, status: "imported", id });
+}
+
+// Défait un import : efface tout ce qu'il a apporté, par petits lots. Les messages arrivés autrement
+// ne sont pas touchés. À rappeler tant que « remaining » n'est pas à zéro.
+async function importUndo(request, env) {
+  const body = await readJson(request);
+  const source = body && typeof body.source === "string" ? body.source.toLowerCase() : "";
+  if (!IMPORT_SOURCE.test(source)) return json({ error: "Origine de l'import invalide." }, 400);
+  let removed = 0;
+  for (let round = 0; round < 3; round++) {
+    const batch = await env.DB.prepare("SELECT id, r2_key FROM messages WHERE import_ref IS NOT NULL AND source = ?1 LIMIT 90").bind(source).all();
+    const rows = batch.results || [];
+    if (!rows.length) break;
+    const ids = rows.map((r) => r.id);
+    await env.MAIL_BUCKET.delete(rows.map((r) => r.r2_key));
+    const results = await env.DB.batch([
+      ...forgetStatements(env, ids),
+      env.DB.prepare(`DELETE FROM messages WHERE id IN (${ids.map(() => "?").join(",")})`).bind(...ids),
+    ]);
+    await spend(env, rowsWritten(results));
+    removed += rows.length;
+    if (rows.length < 90) break;
+  }
+  const left = await env.DB.prepare("SELECT COUNT(*) AS n FROM messages WHERE import_ref IS NOT NULL AND source = ?1").bind(source).first();
+  const remaining = left ? left.n : 0;
+  if (!remaining) {
+    // Les dossiers que l'import avait créés et qui se retrouvent vides partent aussi.
+    await env.DB.batch([
+      env.DB.prepare("DELETE FROM labels WHERE source = ?1 AND id NOT IN (SELECT label_id FROM message_labels)").bind(source),
+      env.DB.prepare("DELETE FROM rules WHERE target IS NOT NULL AND target NOT IN (SELECT id FROM labels)"),
+    ]);
+  }
+  return json({ ok: true, removed, remaining });
 }
 
 // --------------------------------------------------------------- brouillons
@@ -1075,6 +1500,7 @@ async function emptyTrash(env) {
     await env.MAIL_BUCKET.delete([...rows.map((r) => r.r2_key), ...(files.results || []).map((f) => `uploads/${f.id}`)]);
     await env.DB.batch([
       env.DB.prepare(`DELETE FROM uploads WHERE message_id IN (${marks})`).bind(...ids),
+      ...forgetStatements(env, ids),
       env.DB.prepare(`DELETE FROM messages WHERE id IN (${marks})`).bind(...ids),
     ]);
     removed += rows.length;
@@ -1232,7 +1658,7 @@ async function sendMessage(request, url, env) {
       .bind(id, fromAddress, sender.name, to.list.join(", ").slice(0, 320), payload.subject, now, bytes.byteLength, key, thread || id)
       .run();
     // Le texte d'un message qu'on envoie est connu : il entre tout de suite dans la recherche.
-    await env.DB.prepare("INSERT INTO messages_fts (id, body) VALUES (?1, ?2)")
+    await env.DB.prepare("INSERT OR REPLACE INTO messages_fts (rowid, id, body) VALUES ((SELECT rowid FROM messages WHERE id = ?1), ?1, ?2)")
       .bind(id, tidyText(text))
       .run()
       .catch((err) => console.error("Message envoyé non indexé :", err));
