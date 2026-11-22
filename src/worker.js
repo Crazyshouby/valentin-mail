@@ -1014,8 +1014,17 @@ const LIST_COLUMNS =
 // Dossiers personnels où le message est rangé (leurs identifiants).
 const LABEL_IDS = "(SELECT group_concat(label_id) FROM message_labels ml WHERE ml.message_id = messages.id) AS labels";
 
+// Pour la liste : le début du texte du message (pris dans l'index de recherche, donc absent tant que
+// le message n'y est pas) et le nombre de ses pièces jointes relevées.
+const ITEM_EXTRAS =
+  "(SELECT substr(body, 1, 240) FROM messages_fts WHERE rowid = messages.rowid) AS snippet, " +
+  "(SELECT COUNT(*) FROM attachments a WHERE a.message_id = messages.id) AS files";
+
 function withLabels(row) {
-  if (row) row.labels = row.labels ? String(row.labels).split(",") : [];
+  if (row) {
+    row.labels = row.labels ? String(row.labels).split(",") : [];
+    if ("snippet" in row) row.snippet = String(row.snippet || "").replace(/\s+/g, " ").trim().slice(0, 160);
+  }
   return row;
 }
 
@@ -1068,7 +1077,7 @@ async function findThread(env, { refs, subject, correspondent }) {
 
 async function listThread(id, env) {
   const rows = await env.DB.prepare(
-    `SELECT ${LIST_COLUMNS}, ${LABEL_IDS} FROM messages WHERE thread_id = ?1 AND folder != 'trash' ORDER BY date ASC LIMIT 200`
+    `SELECT ${LIST_COLUMNS}, ${LABEL_IDS}, ${ITEM_EXTRAS} FROM messages WHERE thread_id = ?1 AND folder != 'trash' ORDER BY date ASC LIMIT 200`
   )
     .bind(id)
     .all();
@@ -1119,7 +1128,7 @@ async function listMessages(url, env) {
 
   const [list, unread] = await env.DB.batch([
     env.DB.prepare(
-      `SELECT ${LIST_COLUMNS}, ${LABEL_IDS}, ${THREAD_COUNT} FROM messages WHERE ${where.join(" AND ")} ORDER BY date DESC LIMIT ${PAGE_SIZE + 1}`
+      `SELECT ${LIST_COLUMNS}, ${LABEL_IDS}, ${ITEM_EXTRAS}, ${THREAD_COUNT} FROM messages WHERE ${where.join(" AND ")} ORDER BY date DESC LIMIT ${PAGE_SIZE + 1}`
     ).bind(...params),
     env.DB.prepare("SELECT COUNT(*) AS n FROM messages WHERE folder = 'inbox' AND is_read = 0"),
   ]);
@@ -1134,7 +1143,7 @@ async function listMessages(url, env) {
 }
 
 async function findMessage(id, env) {
-  return withLabels(await env.DB.prepare(`SELECT ${LIST_COLUMNS}, ${LABEL_IDS}, r2_key FROM messages WHERE id = ?1`).bind(id).first());
+  return withLabels(await env.DB.prepare(`SELECT ${LIST_COLUMNS}, ${LABEL_IDS}, ${ITEM_EXTRAS}, r2_key FROM messages WHERE id = ?1`).bind(id).first());
 }
 
 async function getMessage(id, env) {
