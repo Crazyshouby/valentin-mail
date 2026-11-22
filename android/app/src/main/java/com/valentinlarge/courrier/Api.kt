@@ -138,6 +138,8 @@ class Api(private val prefs: Prefs) {
         threadCount = maxOf(1, optInt("thread_count", 1)),
         labels = optJSONArray("labels")?.let { a -> (0 until a.length()).map { a.optString(it) }.filter { it.isNotBlank() } } ?: emptyList(),
         box = text("box"),
+        snippet = text("snippet"),
+        files = optInt("files"),
     )
 
     private fun JSONArray?.toFiles(): List<RemoteFile> {

@@ -1,44 +1,41 @@
 package com.valentinlarge.courrier
 
-import androidx.compose.foundation.background
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SnackbarHost
-import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -47,7 +44,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -55,251 +52,119 @@ import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 
-/** Les réglages : adresses du domaine, règles de tri, signature, notifications, verrou et appareils connectés. */
-@OptIn(ExperimentalMaterial3Api::class)
+/**
+ * La page des réglages : d'abord un sommaire (thème, adresses, règles de tri, signature, notifications,
+ * verrou, appareils connectés), puis une page par sujet, qui glisse à sa place.
+ */
 @Composable
-fun SettingsScreen(vm: MainViewModel, snackbar: SnackbarHostState) {
-    val page = vm.aliasPage
-    val domain = page?.domain?.ifBlank { null } ?: vm.address.substringAfter('@')
-    val context = LocalContext.current
-    var closingOthers by remember { mutableStateOf(false) }
+fun SettingsPage(vm: MainViewModel) {
+    var section by remember { mutableStateOf<String?>(null) }
+    // Depuis un sujet, le bouton retour ramène au sommaire avant de quitter les réglages.
+    BackHandler(enabled = section != null) { section = null }
 
-    Scaffold(
-        containerColor = Paper,
-        snackbarHost = { SnackbarHost(snackbar) },
-        topBar = {
-            Column(Modifier.background(Paper)) {
-                TopAppBar(
-                    title = { Text("Réglages", style = MaterialTheme.typography.titleLarge) },
-                    navigationIcon = {
-                        IconButton(onClick = { vm.back() }) {
-                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Retour à la boîte")
-                        }
-                    },
-                    colors = TopAppBarDefaults.topAppBarColors(containerColor = Paper),
-                )
-                if (vm.settingsBusy) LinearProgressIndicator(Modifier.fillMaxWidth(), color = Blue, trackColor = BlueWash) else AirmailStripe()
-            }
+    AnimatedContent(
+        targetState = section,
+        transitionSpec = {
+            // Un sujet arrive par la droite ; le sommaire revient par la gauche.
+            val side = if (targetState != null) 1 else -1
+            (slideInHorizontally(tween(380, easing = Glide)) { width -> side * width / 6 } + fadeIn(tween(220))) togetherWith fadeOut(tween(120))
         },
-    ) { padding ->
-        Column(
-            Modifier
-                .padding(padding)
-                .consumeWindowInsets(padding)
-                .fillMaxSize()
-                .imePadding()
-                .verticalScroll(rememberScrollState())
-                .padding(bottom = 32.dp)
-        ) {
-            vm.settingsError?.let {
-                Text(it, modifier = Modifier.fillMaxWidth().padding(16.dp), color = Red, fontWeight = FontWeight.Medium)
+        label = "réglages",
+    ) { current ->
+        if (current == null) {
+            SettingsHub(vm, onOpen = { section = it })
+        } else {
+            SettingsSection(vm, current, onBack = { section = null })
+        }
+    }
+}
+
+private fun howMany(number: Int, one: String, many: String): String = if (number == 1) "1 $one" else "$number $many"
+
+@Composable
+private fun SettingsHub(vm: MainViewModel, onOpen: (String) -> Unit) {
+    val context = LocalContext.current
+    Column(
+        Modifier
+            .fillMaxSize()
+            .statusBarsPadding()
+            .verticalScroll(rememberScrollState())
+            .padding(start = 16.dp, end = 16.dp, top = 6.dp, bottom = 120.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+        Column {
+            Box(Modifier.height(48.dp), contentAlignment = Alignment.CenterStart) {
+                Text("Réglages", style = MaterialTheme.typography.headlineMedium, maxLines = 1)
             }
+            Text(vm.address, style = MaterialTheme.typography.bodySmall.copy(fontSize = 14.sp), color = Muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
 
-            // ---------------------------------------------------- adresses
-            SectionTitle(
-                "Tes adresses",
-                "Chaque adresse en @$domain qui reçoit un message apparaît ici. Coupe celle qui attire le spam : " +
-                    "elle refusera le courrier, les autres continuent de marcher.",
-            )
-            Column(Modifier.fillMaxWidth().background(Sheet)) {
-                (page?.aliases ?: emptyList()).forEach { alias ->
-                    val main = alias.address == page?.main
-                    Row(
-                        Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Column(Modifier.weight(1f)) {
-                            Text(alias.address, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            val details = listOfNotNull(
-                                if (main) "adresse principale" else null,
-                                alias.label.ifBlank { null },
-                                when (alias.received) {
-                                    0 -> "aucun message reçu"
-                                    1 -> "1 message reçu"
-                                    else -> "${alias.received} messages reçus"
-                                },
-                                if (!alias.enabled) "coupée" else null,
-                            )
-                            Text(details.joinToString(", "), style = MaterialTheme.typography.bodySmall, color = if (alias.enabled) Muted else Red)
-                        }
-                        if (!main) {
-                            Switch(
-                                checked = alias.enabled,
-                                onCheckedChange = { vm.setAliasEnabled(alias, it) },
-                                enabled = !vm.settingsBusy,
-                                modifier = Modifier.testTag("actif-${alias.address}"),
-                            )
-                            IconButton(onClick = { vm.forgetAlias(alias) }, enabled = !vm.settingsBusy) {
-                                Icon(Icons.Filled.Close, contentDescription = "Retirer ${alias.address} de la liste")
-                            }
-                        }
-                    }
-                    HorizontalDivider(color = Line)
-                }
-                if (page == null && !vm.settingsBusy && vm.settingsError == null) {
-                    Text("Chargement…", modifier = Modifier.padding(16.dp), color = Muted)
-                }
+        vm.settingsError?.let { Text(it, color = Red, fontWeight = FontWeight.Medium) }
 
-                var name by rememberSaveable { mutableStateOf("") }
-                Row(
-                    Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                ) {
-                    OutlinedTextField(
-                        value = name,
-                        onValueChange = { name = it.filterNot(Char::isWhitespace) },
-                        label = { Text("Nouvelle adresse") },
-                        suffix = { Text("@$domain", color = Muted) },
-                        singleLine = true,
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email, capitalization = KeyboardCapitalization.None),
-                        modifier = Modifier.weight(1f).testTag("alias-nom"),
-                    )
-                    Button(
-                        onClick = {
-                            vm.addAlias(name, "")
-                            name = ""
-                        },
-                        enabled = name.isNotBlank() && !vm.settingsBusy,
-                    ) { Text("Ajouter") }
-                }
+        // ------------------------------------------------------- thème
+        Card {
+            Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+                Icon(Glyphs.Moon, contentDescription = null, tint = Muted, modifier = Modifier.size(22.dp))
+                Spacer(Modifier.width(14.dp))
+                Text("Thème", modifier = Modifier.weight(1f))
             }
-            Text(
-                "Pour qu'une adresse reçoive du courrier, la règle « Catch-all » doit envoyer tout le domaine vers le Worker, " +
-                    "dans Cloudflare (Email Routing). Écrire depuis une adresse marche sans cela.",
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
-                style = MaterialTheme.typography.bodySmall,
-                color = Muted,
-            )
-
-            // ------------------------------------------------------ règles
-            SectionTitle(
-                "Règles de tri",
-                "À l'arrivée d'un message, la première règle qui correspond s'applique. Les majuscules ne comptent pas.",
-            )
-            Column(Modifier.fillMaxWidth().background(Sheet)) {
-                vm.rules.forEach { rule ->
-                    Row(
-                        Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, top = 6.dp, bottom = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        val where = vm.labelName(rule.target.orEmpty()) ?: "un dossier"
-                        val what = when (rule.action) {
-                            "label" -> "ranger dans « $where »"
-                            "file" -> "ranger dans « $where », sans passer par la réception"
-                            else -> labelOf(RULE_ACTIONS, rule.action)
-                        }
-                        Text(
-                            "Si ${labelOf(RULE_FIELDS, rule.field)} contient « ${rule.value} » : $what",
-                            modifier = Modifier.weight(1f),
-                            style = MaterialTheme.typography.bodyMedium,
-                        )
-                        IconButton(onClick = { vm.deleteRule(rule) }, enabled = !vm.settingsBusy) {
-                            Icon(Icons.Filled.Close, contentDescription = "Supprimer la règle sur ${rule.value}")
-                        }
-                    }
-                    HorizontalDivider(color = Line)
-                }
-
-                var field by rememberSaveable { mutableStateOf("from") }
-                var action by rememberSaveable { mutableStateOf("archive") }
-                var value by rememberSaveable { mutableStateOf("") }
-                var target by rememberSaveable { mutableStateOf("") }
-                val needsFolder = action == "label" || action == "file"
-                Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("Si", modifier = Modifier.width(52.dp), color = Muted)
-                        Choice(RULE_FIELDS, field, onPick = { field = it }, tag = "regle-champ")
-                    }
-                    OutlinedTextField(
-                        value = value,
-                        onValueChange = { value = it },
-                        label = { Text("contient") },
-                        placeholder = { Text("un nom, une adresse, un mot") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth().testTag("regle-texte"),
-                    )
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("alors", modifier = Modifier.width(52.dp), color = Muted)
-                        Choice(RULE_ACTIONS, action, onPick = { action = it }, tag = "regle-action")
-                    }
-                    if (needsFolder) {
-                        if (vm.labels.isEmpty()) {
-                            Text(
-                                "Crée d'abord un dossier, depuis le menu en haut à gauche de la boîte.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = Muted,
-                            )
-                        } else {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text("dans", modifier = Modifier.width(52.dp), color = Muted)
-                                Choice(
-                                    vm.labels.map { it.id to it.name },
-                                    target,
-                                    onPick = { target = it },
-                                    tag = "regle-dossier",
-                                    placeholder = "choisir un dossier",
-                                )
-                            }
-                        }
-                    }
-                    Button(
-                        onClick = {
-                            vm.addRule(field, value, action, if (needsFolder) target else null)
-                            value = ""
-                        },
-                        enabled = value.isNotBlank() && !vm.settingsBusy && (!needsFolder || vm.labels.any { it.id == target }),
-                    ) { Text("Ajouter la règle") }
-                }
-            }
-
-            // --------------------------------------------------- signature
-            SectionTitle("Signature", "Ajoutée au bas des messages que tu écris, sous l'endroit où tu tapes. Tu peux la retirer d'un message avant l'envoi.")
-            Column(Modifier.fillMaxWidth().background(Sheet).padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                var text by rememberSaveable(vm.signature) { mutableStateOf(vm.signature) }
-                OutlinedTextField(
-                    value = text,
-                    onValueChange = { text = it },
-                    placeholder = { Text("Ton nom, ton métier, un numéro…") },
-                    minLines = 3,
-                    keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
-                    modifier = Modifier.fillMaxWidth().testTag("signature"),
-                )
-                Button(
-                    onClick = { vm.saveSignature(text) },
-                    enabled = text.trim() != vm.signature && !vm.settingsBusy,
-                ) { Text("Enregistrer la signature") }
-            }
-
-            // ----------------------------------------------- notifications
-            SectionTitle(
-                "Notifications",
-                when {
-                    vm.pushApp && vm.pushServer -> "Instantanées : le serveur prévient ce téléphone dès qu'un message arrive."
-                    !vm.pushApp -> "Vérifiées toutes les 15 minutes environ. Cette version de l'appli n'a pas reçu les réglages Firebase."
-                    else -> "Vérifiées toutes les 15 minutes environ. Le serveur n'a pas encore la clé Firebase (secret FCM_SERVICE_ACCOUNT)."
-                },
-            )
-            if (vm.pushApp) {
-                OutlinedButton(
-                    onClick = { vm.testPush() },
-                    enabled = !vm.pushTesting,
-                    modifier = Modifier.padding(horizontal = 16.dp),
-                ) { Text(if (vm.pushTesting) "Essai en cours…" else "Tester les notifications") }
-            }
-
-            // ------------------------------------------------ verrouillage
-            SectionTitle(
-                "Verrouillage",
-                "L'appli demande ton empreinte, ou à défaut le code du téléphone, avant de montrer le courrier : à l'ouverture, " +
-                    "et quand tu y reviens après plus d'une minute. Les notifications continuent d'afficher l'expéditeur et l'objet.",
-            )
             Row(
-                Modifier.fillMaxWidth().background(Sheet).padding(start = 16.dp, end = 12.dp, top = 6.dp, bottom = 6.dp),
+                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(start = 16.dp, end = 16.dp, bottom = 14.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                // « Automatique » suit le réglage clair ou sombre du téléphone.
+                listOf("auto" to "Automatique", "light" to "Clair", "dark" to "Sombre").forEach { (mode, label) ->
+                    Chip(label, selected = vm.themeMode == mode, onClick = { vm.chooseTheme(mode) }, modifier = Modifier.testTag("theme-$mode"))
+                }
+            }
+        }
+
+        // ------------------------------------------- courrier : adresses, tri, signature
+        Card {
+            SettingLine(
+                Glyphs.At,
+                "Adresses",
+                note = vm.aliasPage?.let { howMany(it.aliases.size, "adresse", "adresses") },
+                modifier = Modifier.testTag("reglage-adresses"),
+                onClick = { onOpen("adresses") },
+            )
+            Hairline()
+            SettingLine(
+                Glyphs.Funnel,
+                "Règles de tri",
+                note = if (vm.rules.isEmpty()) "aucune" else howMany(vm.rules.size, "règle", "règles"),
+                modifier = Modifier.testTag("reglage-regles"),
+                onClick = { onOpen("regles") },
+            )
+            Hairline()
+            SettingLine(
+                Glyphs.Pencil,
+                "Signature",
+                note = if (vm.signature.isBlank()) "aucune" else null,
+                modifier = Modifier.testTag("reglage-signature"),
+                onClick = { onOpen("signature") },
+            )
+            Hairline()
+            SettingLine(
+                Glyphs.Bell,
+                "Notifications",
+                note = if (vm.pushApp && vm.pushServer) "instantanées" else "toutes les 15 min",
+                modifier = Modifier.testTag("reglage-notifications"),
+                onClick = { onOpen("notifications") },
+            )
+        }
+
+        // ------------------------------------------------ verrou et appareils
+        Card {
+            Row(
+                Modifier.fillMaxWidth().heightIn(min = 52.dp).padding(start = 16.dp, end = 12.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text("Verrouiller l'appli par empreinte", modifier = Modifier.weight(1f))
+                Icon(Glyphs.Padlock, contentDescription = null, tint = Muted, modifier = Modifier.size(22.dp))
+                Spacer(Modifier.width(14.dp))
+                Text("Verrou par empreinte", modifier = Modifier.weight(1f))
                 Switch(
                     checked = vm.lockEnabled,
                     onCheckedChange = { wanted ->
@@ -319,60 +184,376 @@ fun SettingsScreen(vm: MainViewModel, snackbar: SnackbarHostState) {
                             }
                         }
                     },
+                    colors = switchColors(),
                     modifier = Modifier.testTag("verrou"),
                 )
             }
-
-            // ------------------------------------------ appareils connectés
-            SectionTitle(
-                "Appareils connectés",
-                "Chaque téléphone ou navigateur où la boîte est ouverte. Un appareil déconnecté doit redonner le mot de passe.",
-            )
-            Column(Modifier.fillMaxWidth().background(Sheet)) {
-                vm.sessions.forEach { session ->
-                    val name = session.name.ifBlank { if (session.kind == "app") "Appli Courrier" else "Navigateur" }
-                    Row(
-                        Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Column(Modifier.weight(1f)) {
-                            Text(name, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            val details = listOfNotNull(
-                                if (session.current) "cet appareil" else null,
-                                if (session.kind == "app") "appli" else "navigateur",
-                                session.place.ifBlank { null },
-                                if (session.current) null else "dernière activité : ${shortDate(session.seen)}",
-                            )
-                            Text(details.joinToString(", "), style = MaterialTheme.typography.bodySmall, color = Muted)
-                        }
-                        if (!session.current) {
-                            TextButton(
-                                onClick = { vm.closeSession(session) },
-                                enabled = !vm.settingsBusy,
-                                modifier = Modifier.testTag("deconnecter-$name"),
-                            ) { Text("Déconnecter", color = Red) }
-                        }
-                    }
-                    HorizontalDivider(color = Line)
-                }
-                if (vm.sessions.isEmpty() && !vm.settingsBusy && vm.settingsError == null) {
-                    Text("Chargement…", modifier = Modifier.padding(16.dp), color = Muted)
-                }
-                OutlinedButton(
-                    onClick = { closingOthers = true },
-                    enabled = !vm.settingsBusy,
-                    modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 12.dp).testTag("deconnecter-les-autres"),
-                ) { Text("Déconnecter tous les autres appareils") }
-                Text(
-                    "Ferme aussi les connexions anciennes qui ne se sont pas encore montrées dans cette liste.",
-                    modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 6.dp, bottom = 14.dp),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Muted,
+            if (vm.lockEnabled) {
+                Hairline()
+                SettingLine(
+                    Glyphs.Fingerprint,
+                    "Verrouiller maintenant",
+                    chevron = false,
+                    modifier = Modifier.testTag("verrouiller-maintenant"),
+                    onClick = { vm.lockNow() },
                 )
             }
-            Spacer(Modifier.height(24.dp))
+            Hairline()
+            SettingLine(
+                Glyphs.Phone,
+                "Appareils connectés",
+                note = if (vm.sessions.isEmpty()) null else vm.sessions.size.toString(),
+                modifier = Modifier.testTag("reglage-appareils"),
+                onClick = { onOpen("appareils") },
+            )
+        }
+        Text(
+            "Le verrou demande ton empreinte, ou à défaut le code du téléphone, à l'ouverture de l'appli et quand tu y reviens " +
+                "après plus d'une minute. Les notifications continuent d'afficher l'expéditeur et l'objet.",
+            modifier = Modifier.padding(horizontal = 4.dp),
+            style = MaterialTheme.typography.bodySmall,
+            color = Muted,
+        )
+
+        TextButton(onClick = { vm.logout() }) {
+            Text("Se déconnecter", color = Red, fontWeight = FontWeight.SemiBold)
+        }
+        Text(
+            "Courrier ${BuildConfig.VERSION_NAME}",
+            modifier = Modifier.padding(horizontal = 12.dp),
+            style = MaterialTheme.typography.bodySmall,
+            color = Muted,
+        )
+    }
+}
+
+/** Une ligne du sommaire : un pictogramme, un intitulé, parfois une précision, et le chevron qui dit « la suite ». */
+@Composable
+private fun SettingLine(
+    glyph: ImageVector,
+    title: String,
+    modifier: Modifier = Modifier,
+    note: String? = null,
+    chevron: Boolean = true,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier.fillMaxWidth().clickable(onClick = onClick).heightIn(min = 52.dp).padding(horizontal = 16.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(glyph, contentDescription = null, tint = Muted, modifier = Modifier.size(22.dp))
+        Spacer(Modifier.width(14.dp))
+        Text(title, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+        if (note != null) Text(note, style = MaterialTheme.typography.bodySmall, color = Muted, maxLines = 1)
+        if (chevron) {
+            Spacer(Modifier.width(6.dp))
+            Icon(Glyphs.ChevronRight, contentDescription = null, tint = Muted, modifier = Modifier.size(18.dp))
         }
     }
+}
+
+/** La page d'un sujet : son titre, de quoi revenir au sommaire, et le liseré qui défile pendant que le serveur travaille. */
+@Composable
+private fun SettingsSection(vm: MainViewModel, section: String, onBack: () -> Unit) {
+    val title = when (section) {
+        "adresses" -> "Adresses"
+        "regles" -> "Règles de tri"
+        "signature" -> "Signature"
+        "notifications" -> "Notifications"
+        else -> "Appareils connectés"
+    }
+    Column(Modifier.fillMaxSize().statusBarsPadding().imePadding()) {
+        Row(Modifier.fillMaxWidth().padding(start = 4.dp, end = 16.dp, top = 6.dp).height(48.dp), verticalAlignment = Alignment.CenterVertically) {
+            GlyphButton(Glyphs.Back, "Retour aux réglages", onClick = onBack)
+            Text(title, modifier = Modifier.padding(start = 2.dp), style = MaterialTheme.typography.titleLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        Box(Modifier.fillMaxWidth().height(4.dp)) {
+            if (vm.settingsBusy) AirmailStripe(running = true, height = 4.dp)
+        }
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .weight(1f)
+                .verticalScroll(rememberScrollState())
+                .padding(start = 16.dp, end = 16.dp, top = 10.dp, bottom = 120.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            vm.settingsError?.let { Text(it, color = Red, fontWeight = FontWeight.Medium) }
+            when (section) {
+                "adresses" -> Addresses(vm)
+                "regles" -> Rules(vm)
+                "signature" -> Signature(vm)
+                "notifications" -> Notifications(vm)
+                else -> Devices(vm)
+            }
+        }
+    }
+}
+
+@Composable
+private fun Help(text: String) {
+    Text(text, modifier = Modifier.padding(horizontal = 4.dp), style = MaterialTheme.typography.bodySmall.copy(fontSize = 14.sp, lineHeight = 19.sp), color = Muted)
+}
+
+// ---------------------------------------------------------------- adresses
+
+@Composable
+private fun Addresses(vm: MainViewModel) {
+    val page = vm.aliasPage
+    val domain = page?.domain?.ifBlank { null } ?: vm.address.substringAfter('@')
+    Help(
+        "Chaque adresse en @$domain qui reçoit un message apparaît ici. Coupe celle qui attire le spam : " +
+            "elle refusera le courrier, les autres continuent de marcher.",
+    )
+    Card {
+        (page?.aliases ?: emptyList()).forEachIndexed { index, alias ->
+            val main = alias.address == page?.main
+            if (index > 0) Hairline()
+            Row(
+                Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(alias.address, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    val details = listOfNotNull(
+                        if (main) "adresse principale" else null,
+                        alias.label.ifBlank { null },
+                        when (alias.received) {
+                            0 -> "aucun message reçu"
+                            1 -> "1 message reçu"
+                            else -> "${alias.received} messages reçus"
+                        },
+                        if (!alias.enabled) "coupée" else null,
+                    )
+                    Text(details.joinToString(", "), style = MaterialTheme.typography.bodySmall, color = if (alias.enabled) Muted else Red)
+                }
+                if (main) {
+                    Spacer(Modifier.width(12.dp))
+                } else {
+                    Switch(
+                        checked = alias.enabled,
+                        onCheckedChange = { vm.setAliasEnabled(alias, it) },
+                        enabled = !vm.settingsBusy,
+                        colors = switchColors(),
+                        modifier = Modifier.testTag("actif-${alias.address}"),
+                    )
+                    GlyphButton(Glyphs.Close, "Retirer ${alias.address} de la liste", onClick = { vm.forgetAlias(alias) }, enabled = !vm.settingsBusy, tint = Muted)
+                }
+            }
+        }
+        if (page == null && !vm.settingsBusy && vm.settingsError == null) {
+            Text("Chargement…", modifier = Modifier.padding(16.dp), color = Muted)
+        }
+    }
+
+    var name by rememberSaveable { mutableStateOf("") }
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        OutlinedTextField(
+            value = name,
+            onValueChange = { name = it.filterNot(Char::isWhitespace) },
+            label = { Text("Nouvelle adresse") },
+            suffix = { Text("@$domain", color = Muted) },
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email, capitalization = KeyboardCapitalization.None),
+            shape = FieldShape,
+            colors = fieldColors(),
+            modifier = Modifier.weight(1f).testTag("alias-nom"),
+        )
+        Pill(
+            "Ajouter",
+            onClick = {
+                vm.addAlias(name, "")
+                name = ""
+            },
+            enabled = name.isNotBlank() && !vm.settingsBusy,
+            modifier = Modifier.padding(top = 6.dp),
+        )
+    }
+    Help(
+        "Pour qu'une adresse reçoive du courrier, la règle « Catch-all » doit envoyer tout le domaine vers le Worker, " +
+            "dans Cloudflare (Email Routing). Écrire depuis une adresse marche sans cela.",
+    )
+}
+
+// ------------------------------------------------------------------ règles
+
+private fun labelOf(options: List<Pair<String, String>>, id: String): String = options.firstOrNull { it.first == id }?.second ?: id
+
+@Composable
+private fun Rules(vm: MainViewModel) {
+    Help("À l'arrivée d'un message, la première règle qui correspond s'applique. Les majuscules ne comptent pas.")
+    if (vm.rules.isNotEmpty()) {
+        Card {
+            vm.rules.forEachIndexed { index, rule ->
+                if (index > 0) Hairline()
+                Row(
+                    Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    val where = vm.labelName(rule.target.orEmpty()) ?: "un dossier"
+                    val what = when (rule.action) {
+                        "label" -> "ranger dans « $where »"
+                        "file" -> "ranger dans « $where », sans passer par la réception"
+                        else -> labelOf(RULE_ACTIONS, rule.action)
+                    }
+                    Text(
+                        "Si ${labelOf(RULE_FIELDS, rule.field)} contient « ${rule.value} » : $what",
+                        modifier = Modifier.weight(1f),
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    GlyphButton(Glyphs.Close, "Supprimer la règle sur ${rule.value}", onClick = { vm.deleteRule(rule) }, enabled = !vm.settingsBusy, tint = Muted)
+                }
+            }
+        }
+    }
+
+    var field by rememberSaveable { mutableStateOf("from") }
+    var action by rememberSaveable { mutableStateOf("archive") }
+    var value by rememberSaveable { mutableStateOf("") }
+    var target by rememberSaveable { mutableStateOf("") }
+    val needsFolder = action == "label" || action == "file"
+    Card {
+        Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text("Nouvelle règle", fontWeight = FontWeight.SemiBold)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Si", modifier = Modifier.width(52.dp), color = Muted)
+                Choice(RULE_FIELDS, field, onPick = { field = it }, tag = "regle-champ")
+            }
+            OutlinedTextField(
+                value = value,
+                onValueChange = { value = it },
+                label = { Text("contient") },
+                placeholder = { Text("un nom, une adresse, un mot") },
+                singleLine = true,
+                shape = FieldShape,
+                colors = fieldColors(),
+                modifier = Modifier.fillMaxWidth().testTag("regle-texte"),
+            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("alors", modifier = Modifier.width(52.dp), color = Muted)
+                Choice(RULE_ACTIONS, action, onPick = { action = it }, tag = "regle-action")
+            }
+            if (needsFolder) {
+                if (vm.labels.isEmpty()) {
+                    Text(
+                        "Crée d'abord un dossier, en touchant le titre de la page du courrier.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Muted,
+                    )
+                } else {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("dans", modifier = Modifier.width(52.dp), color = Muted)
+                        Choice(
+                            vm.labels.map { it.id to it.name },
+                            target,
+                            onPick = { target = it },
+                            tag = "regle-dossier",
+                            placeholder = "choisir un dossier",
+                        )
+                    }
+                }
+            }
+            Pill(
+                "Ajouter la règle",
+                onClick = {
+                    vm.addRule(field, value, action, if (needsFolder) target else null)
+                    value = ""
+                },
+                enabled = value.isNotBlank() && !vm.settingsBusy && (!needsFolder || vm.labels.any { it.id == target }),
+            )
+        }
+    }
+}
+
+// --------------------------------------------------------------- signature
+
+@Composable
+private fun Signature(vm: MainViewModel) {
+    Help("Ajoutée au bas des messages que tu écris, sous l'endroit où tu tapes. Tu peux la retirer d'un message avant l'envoi.")
+    var text by rememberSaveable(vm.signature) { mutableStateOf(vm.signature) }
+    OutlinedTextField(
+        value = text,
+        onValueChange = { text = it },
+        placeholder = { Text("Ton nom, ton métier, un numéro…") },
+        minLines = 3,
+        keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
+        shape = FieldShape,
+        colors = fieldColors(),
+        modifier = Modifier.fillMaxWidth().testTag("signature"),
+    )
+    Pill(
+        "Enregistrer la signature",
+        onClick = { vm.saveSignature(text) },
+        enabled = text.trim() != vm.signature && !vm.settingsBusy,
+    )
+}
+
+// ----------------------------------------------------------- notifications
+
+@Composable
+private fun Notifications(vm: MainViewModel) {
+    Help(
+        when {
+            vm.pushApp && vm.pushServer -> "Instantanées : le serveur prévient ce téléphone dès qu'un message arrive."
+            !vm.pushApp -> "Vérifiées toutes les 15 minutes environ. Cette version de l'appli n'a pas reçu les réglages Firebase."
+            else -> "Vérifiées toutes les 15 minutes environ. Le serveur n'a pas encore la clé Firebase (secret FCM_SERVICE_ACCOUNT)."
+        },
+    )
+    if (vm.pushApp) {
+        Pill(
+            if (vm.pushTesting) "Essai en cours…" else "Tester les notifications",
+            onClick = { vm.testPush() },
+            enabled = !vm.pushTesting,
+            filled = false,
+        )
+    }
+}
+
+// ------------------------------------------------------ appareils connectés
+
+@Composable
+private fun Devices(vm: MainViewModel) {
+    var closingOthers by remember { mutableStateOf(false) }
+    Help("Chaque téléphone ou navigateur où la boîte est ouverte. Un appareil déconnecté doit redonner le mot de passe.")
+    Card {
+        vm.sessions.forEachIndexed { index, session ->
+            val name = session.name.ifBlank { if (session.kind == "app") "Appli Courrier" else "Navigateur" }
+            if (index > 0) Hairline()
+            Row(
+                Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(name, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    val details = listOfNotNull(
+                        if (session.current) "cet appareil" else null,
+                        if (session.kind == "app") "appli" else "navigateur",
+                        session.place.ifBlank { null },
+                        if (session.current) null else "dernière activité : ${shortDate(session.seen)}",
+                    )
+                    Text(details.joinToString(", "), style = MaterialTheme.typography.bodySmall, color = Muted)
+                }
+                if (!session.current) {
+                    TextButton(
+                        onClick = { vm.closeSession(session) },
+                        enabled = !vm.settingsBusy,
+                        modifier = Modifier.testTag("deconnecter-$name"),
+                    ) { Text("Déconnecter", color = Red) }
+                }
+            }
+        }
+        if (vm.sessions.isEmpty() && !vm.settingsBusy && vm.settingsError == null) {
+            Text("Chargement…", modifier = Modifier.padding(16.dp), color = Muted)
+        }
+    }
+    Pill(
+        "Déconnecter tous les autres appareils",
+        onClick = { closingOthers = true },
+        enabled = !vm.settingsBusy,
+        filled = false,
+        modifier = Modifier.testTag("deconnecter-les-autres"),
+    )
+    Help("Ferme aussi les connexions anciennes qui ne se sont pas encore montrées dans cette liste.")
 
     if (closingOthers) {
         AlertDialog(
@@ -387,16 +568,6 @@ fun SettingsScreen(vm: MainViewModel, snackbar: SnackbarHostState) {
             },
             dismissButton = { TextButton(onClick = { closingOthers = false }) { Text("Annuler") } },
         )
-    }
-}
-
-private fun labelOf(options: List<Pair<String, String>>, id: String): String = options.firstOrNull { it.first == id }?.second ?: id
-
-@Composable
-private fun SectionTitle(title: String, help: String) {
-    Column(Modifier.padding(start = 16.dp, end = 16.dp, top = 22.dp, bottom = 10.dp)) {
-        Text(title, style = MaterialTheme.typography.titleMedium)
-        Text(help, style = MaterialTheme.typography.bodySmall, color = Muted)
     }
 }
 

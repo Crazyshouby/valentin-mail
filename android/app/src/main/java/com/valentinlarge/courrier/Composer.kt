@@ -2,45 +2,38 @@ package com.valentinlarge.courrier
 
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.CubicBezierEasing
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SnackbarHost
-import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
-import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -48,7 +41,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -56,68 +51,80 @@ import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 
-@OptIn(ExperimentalMaterial3Api::class)
+/**
+ * La rédaction : une feuille qui monte par-dessus le reste. À l'envoi, l'avion du bouton s'envole
+ * et le liseré « par avion » défile jusqu'à ce que le message soit parti.
+ */
 @Composable
-fun ComposeScreen(vm: MainViewModel, snackbar: SnackbarHostState) {
+fun ComposeScreen(vm: MainViewModel) {
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         if (uris.isNotEmpty()) vm.addFiles(uris)
     }
     var confirmDiscard by remember { mutableStateOf(false) }
+    val sending = vm.sending
+    // L'avion part vers le coin de l'écran ; il revient d'un coup, sans faire le trajet à l'envers.
+    val flight by animateFloatAsState(
+        if (sending) 1f else 0f,
+        if (sending) tween(800, easing = CubicBezierEasing(0.5f, 0f, 0.8f, 0.4f)) else snap(),
+        label = "envol",
+    )
 
-    Scaffold(
-        containerColor = Sheet,
-        snackbarHost = { SnackbarHost(snackbar) },
-        topBar = {
-            Column(Modifier.background(Paper)) {
-                TopAppBar(
-                    title = { Text(if (vm.draftReplyTo != null) "Réponse" else "Nouveau message", style = MaterialTheme.typography.titleLarge) },
-                    navigationIcon = {
-                        IconButton(onClick = { vm.back() }, enabled = !vm.sending) {
-                            Icon(Icons.Filled.Close, contentDescription = "Fermer la rédaction")
-                        }
-                    },
-                    actions = {
-                        IconButton(onClick = { confirmDiscard = true }, enabled = !vm.sending) {
-                            Icon(Icons.Filled.Delete, contentDescription = "Supprimer le brouillon")
-                        }
-                        Button(
-                            onClick = { vm.send() },
-                            enabled = !vm.sending && vm.canSend,
-                            modifier = Modifier.padding(end = 8.dp).testTag("envoyer"),
-                        ) {
-                            Text(if (vm.sending) "Patiente…" else "Envoyer")
-                        }
-                    },
-                    colors = TopAppBarDefaults.topAppBarColors(containerColor = Paper),
-                )
-                if (vm.sending) LinearProgressIndicator(Modifier.fillMaxWidth(), color = Blue, trackColor = BlueWash) else AirmailStripe()
-            }
-        },
-    ) { padding ->
-        Column(
-            Modifier
-                .padding(padding)
-                .consumeWindowInsets(padding)
-                .fillMaxSize()
-                .imePadding()
-                .verticalScroll(rememberScrollState())
-        ) {
+    Column(
+        Modifier
+            .fillMaxSize()
+            .statusBarsPadding()
+            .padding(top = 8.dp)
+            .clip(RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp))
+            .background(Sheet)
+            .solid()
+            .imePadding(),
+    ) {
+        Row(Modifier.fillMaxWidth().padding(start = 4.dp, end = 14.dp, top = 8.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            GlyphButton(Glyphs.Close, "Fermer la rédaction", onClick = { vm.back() }, enabled = !sending)
+            Text(
+                if (vm.draftReplyTo != null) "Réponse" else "Nouveau message",
+                modifier = Modifier.weight(1f).padding(start = 2.dp),
+                style = MaterialTheme.typography.titleLarge,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            GlyphButton(Glyphs.Trash, "Supprimer le brouillon", onClick = { confirmDiscard = true }, enabled = !sending, tint = Muted)
+            Spacer(Modifier.width(4.dp))
+            Pill(
+                if (sending) "Patiente…" else "Envoyer",
+                onClick = { vm.send() },
+                glyph = Glyphs.Plane,
+                enabled = !sending && vm.canSend,
+                height = 46.dp,
+                modifier = Modifier.testTag("envoyer"),
+                glyphModifier = Modifier.graphicsLayer {
+                    translationX = 64.dp.toPx() * flight
+                    translationY = -96.dp.toPx() * flight
+                    rotationZ = -14f * flight
+                    scaleX = 1f - 0.3f * flight
+                    scaleY = 1f - 0.3f * flight
+                    alpha = (1f - (flight - 0.35f) / 0.65f).coerceIn(0f, 1f)
+                },
+            )
+        }
+        AirmailStripe(running = sending)
+
+        Column(Modifier.fillMaxWidth().weight(1f).verticalScroll(rememberScrollState())) {
             if (!vm.canSend) {
-                Text(
+                Notice(
                     "L'envoi n'est pas encore activé sur le serveur : il manque la clé du service d'envoi.",
-                    modifier = Modifier.fillMaxWidth().background(BlueWash).padding(horizontal = 16.dp, vertical = 10.dp),
-                    style = MaterialTheme.typography.bodyMedium,
+                    Modifier.padding(start = 16.dp, end = 16.dp, top = 10.dp),
                 )
             }
             vm.sendError?.let {
                 Text(
                     it,
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
+                    modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, top = 12.dp, bottom = 4.dp),
                     color = Red,
                     fontWeight = FontWeight.Medium,
                 )
-                HorizontalDivider(color = Line)
             }
 
             if (vm.from.isNotBlank()) {
@@ -130,13 +137,13 @@ fun ComposeScreen(vm: MainViewModel, snackbar: SnackbarHostState) {
                     Row(
                         Modifier
                             .fillMaxWidth()
-                            .heightIn(min = 56.dp)
-                            .clickable(enabled = several && !vm.sending) { choosing = true }
-                            .padding(horizontal = 16.dp)
+                            .heightIn(min = 52.dp)
+                            .clickable(enabled = several && !sending) { choosing = true }
+                            .padding(horizontal = 20.dp)
                             .testTag("expediteur"),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Text("De", modifier = Modifier.width(56.dp), color = Muted)
+                        FieldName("De")
                         // Même retrait que le texte saisi dans les lignes suivantes.
                         Text(
                             if (name.isNotBlank()) "$name <$chosen>" else chosen,
@@ -144,7 +151,7 @@ fun ComposeScreen(vm: MainViewModel, snackbar: SnackbarHostState) {
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
-                        if (several) Text("Changer", color = Blue, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold)
+                        if (several) Icon(Glyphs.ChevronDown, contentDescription = "Changer d'adresse", tint = Muted, modifier = Modifier.size(18.dp))
                     }
                     DropdownMenu(expanded = choosing, onDismissRequest = { choosing = false }) {
                         vm.addresses.forEach { address ->
@@ -158,7 +165,7 @@ fun ComposeScreen(vm: MainViewModel, snackbar: SnackbarHostState) {
                         }
                     }
                 }
-                HorizontalDivider(color = Line)
+                Hairline(Modifier.padding(horizontal = 20.dp))
             }
             FieldLine("À", vm.draftTo, { vm.draftTo = it }, "destinataire", KeyboardType.Email)
             FieldLine("Cc", vm.draftCc, { vm.draftCc = it }, "copie", KeyboardType.Email)
@@ -169,33 +176,53 @@ fun ComposeScreen(vm: MainViewModel, snackbar: SnackbarHostState) {
                 onValueChange = { vm.draftText = it },
                 placeholder = { Text("Ton message", color = Muted) },
                 keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
+                textStyle = MaterialTheme.typography.bodyLarge.copy(lineHeight = 25.sp),
                 colors = bare(),
-                modifier = Modifier.fillMaxWidth().heightIn(min = 220.dp).testTag("message"),
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp).heightIn(min = 200.dp).testTag("message"),
             )
 
-            if (vm.draftFiles.isNotEmpty()) HorizontalDivider(color = Line)
             vm.draftFiles.forEach { file ->
-                Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                val shape = RoundedCornerShape(16.dp)
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 4.dp)
+                        .clip(shape)
+                        .background(Tint)
+                        .padding(start = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(Glyphs.Clip, contentDescription = null, tint = Muted, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(10.dp))
                     Column(Modifier.weight(1f).padding(vertical = 8.dp)) {
-                        Text(file.name, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(
+                            file.name,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            style = MaterialTheme.typography.bodySmall.copy(fontSize = 14.sp),
+                        )
                         Text(fileSize(file.size), style = MaterialTheme.typography.bodySmall, color = Muted)
                     }
-                    IconButton(onClick = { vm.removeFile(file) }, enabled = !vm.sending) {
-                        Icon(Icons.Filled.Close, contentDescription = "Retirer ${file.name}")
-                    }
+                    GlyphButton(Glyphs.Close, "Retirer ${file.name}", onClick = { vm.removeFile(file) }, enabled = !sending, tint = Muted)
                 }
-                HorizontalDivider(color = Line)
             }
+            Spacer(Modifier.heightIn(min = 12.dp))
+        }
 
-            TextButton(
+        Hairline()
+        Row(
+            Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 16.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Pill(
+                "Joindre un fichier",
                 onClick = { picker.launch(arrayOf("*/*")) },
-                enabled = !vm.sending,
-                modifier = Modifier.padding(horizontal = 6.dp, vertical = 6.dp),
-            ) {
-                Icon(Icons.Filled.Add, contentDescription = null)
-                Spacer(Modifier.width(6.dp))
-                Text("Joindre un fichier")
-            }
+                glyph = Glyphs.Clip,
+                enabled = !sending,
+                filled = false,
+                height = 44.dp,
+            )
         }
     }
 
@@ -231,11 +258,16 @@ private fun bare() = TextFieldDefaults.colors(
     disabledIndicatorColor = Color.Transparent,
 )
 
+@Composable
+private fun FieldName(label: String) {
+    Text(label, modifier = Modifier.width(44.dp), style = MaterialTheme.typography.bodySmall.copy(fontSize = 14.sp), color = Muted)
+}
+
 /** Une ligne d'en-tête du message : son nom à gauche, la saisie à droite, un filet dessous. */
 @Composable
 private fun FieldLine(label: String, value: String, onChange: (String) -> Unit, tag: String, keyboard: KeyboardType) {
-    Row(Modifier.fillMaxWidth().padding(start = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text(label, modifier = Modifier.width(56.dp), color = Muted)
+    Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+        FieldName(label)
         TextField(
             value = value,
             onValueChange = onChange,
@@ -249,5 +281,5 @@ private fun FieldLine(label: String, value: String, onChange: (String) -> Unit, 
             modifier = Modifier.weight(1f).testTag(tag),
         )
     }
-    HorizontalDivider(color = Line)
+    Hairline(Modifier.padding(horizontal = 20.dp))
 }

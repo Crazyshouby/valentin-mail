@@ -167,7 +167,35 @@ class E2eTest {
 
     private fun backToList() {
         rule.onNodeWithContentDescription("Retour à la liste").performClick()
-        waitText("Réception")
+        rule.waitUntil(15_000) { vm.screen !is Screen.Reader }
+        rule.waitForIdle()
+    }
+
+    /** Relève la liste, comme le geste de la tirer vers le bas. */
+    private fun refresh() {
+        rule.runOnUiThread { vm.refresh() }
+        rule.waitForIdle()
+    }
+
+    /** Ouvre un dossier de la boîte, depuis le panneau qui monte quand on touche le titre de la page. */
+    private fun folder(id: String) {
+        rule.onNodeWithTag("bouton-dossiers").performClick()
+        waitText("Nouveau dossier")
+        rule.onNodeWithTag("systeme-$id").performScrollTo().performClick()
+        rule.waitUntil(15_000) { vm.folder == id }
+        waitGone("Nouveau dossier")
+    }
+
+    /** Passe à une page de la barre du bas : « Courrier », « Pièces jointes » ou « Réglages ». */
+    private fun tab(name: String) {
+        rule.onNodeWithContentDescription(name).performClick()
+        rule.waitForIdle()
+    }
+
+    /** Depuis un sujet des réglages, revient à leur sommaire. */
+    private fun backToSettings() {
+        rule.onNodeWithContentDescription("Retour aux réglages").performClick()
+        waitText("Thème")
     }
 
     @Test
@@ -200,7 +228,7 @@ class E2eTest {
         // ---- liste de réception
         waitText("Votre commande est partie")
         waitText("Devis pour")
-        waitText("valentin@valentinlarge.com")
+        waitText("Réception")
         shot("02-reception")
 
         // ---- message HTML : pièce jointe, images distantes masquées, rien d'exécuté
@@ -246,14 +274,14 @@ class E2eTest {
         backToList()
 
         // ---- la copie est rangée dans Envoyés, avec sa pièce jointe
-        rule.onNodeWithText("Envoyés").performClick()
+        folder("sent")
         waitText("Re: Devis pour")
         rule.onNodeWithText("Re: Devis pour", substring = true).performClick()
         waitText("essai-piece.txt")
         assertEquals(piece.length(), vm.opened!!.sentFiles.single().size)
         shot("07-envoye")
         backToList()
-        rule.onNodeWithText("Réception").performClick()
+        folder("inbox")
         waitText("Votre commande est partie")
         // La relève de la liste doit être finie, sinon elle verrait le nouveau mail avant la relève de fond.
         rule.waitUntil(30_000) { !vm.loading }
@@ -293,7 +321,7 @@ class E2eTest {
             Thread.sleep(1500)
         }
 
-        menu("Actualiser")
+        refresh()
         waitText("Rendez-vous jeudi")
         shot("09-nouveau-message")
 
@@ -303,7 +331,7 @@ class E2eTest {
         val server = vm.prefs.server
         vm.prefs.server = "http://10.0.2.2:9"
         try {
-            menu("Actualiser")
+            refresh()
             waitText("Hors connexion")
             shot("10-hors-connexion")
             rule.onNodeWithText("Votre commande est partie").performClick()
@@ -312,7 +340,7 @@ class E2eTest {
         } finally {
             vm.prefs.server = server
         }
-        menu("Actualiser")
+        refresh()
         waitGone("Hors connexion")
 
         // ---- conversation : la réponse reçue rejoint le message d'origine et notre réponse
@@ -322,7 +350,7 @@ class E2eTest {
             "In-Reply-To: <devis-001@example.org>",
             "References: <devis-001@example.org>",
         )
-        menu("Actualiser")
+        refresh()
         rule.waitUntil(30_000) { vm.rows.any { it.count == 3 } }
         shot("12-liste-conversation")
         rule.onNodeWithText("Re: Devis pour l'affiche").performClick()
@@ -342,11 +370,11 @@ class E2eTest {
             "Cc: Marc <marc@example.com>",
             to = "valentin@valentinlarge.com, Lea <lea@example.org>",
         )
-        menu("Actualiser")
+        refresh()
         waitText("Réunion atelier")
         rule.onNodeWithText("Réunion atelier").performClick()
         rule.waitUntil(30_000) { vm.opened != null }
-        menu("Répondre à tous")
+        rule.onNodeWithContentDescription("Répondre à tous").performClick()
         waitText("Réponse")
         rule.onNodeWithTag("destinataire").assertTextContains("paul@example.net")
         assertEquals("lea@example.org, marc@example.com", vm.draftCc)
@@ -358,7 +386,7 @@ class E2eTest {
         // ---- transférer : la pièce jointe d'origine suit
         rule.onNodeWithText("Votre commande est partie").performClick()
         waitText("facture.txt")
-        menu("Transférer")
+        rule.onNodeWithContentDescription("Transférer").performClick()
         waitText("Nouveau message")
         rule.onNodeWithTag("objet").assertTextContains("Fwd: Votre commande est partie")
         waitText("facture.txt")
@@ -380,7 +408,7 @@ class E2eTest {
         closeComposer()
         waitText("Brouillon enregistré")
         settle()
-        rule.onNodeWithText("Brouillons").performClick()
+        folder("drafts")
         waitText("Idée à creuser")
         shell("input keyevent 111")
         shot("15-brouillons")
@@ -393,7 +421,7 @@ class E2eTest {
         waitText("Message envoyé")
         settle()
         waitText("Aucun brouillon")
-        rule.onNodeWithText("Réception").performClick()
+        folder("inbox")
         waitText("Réunion atelier")
 
         // ---- glisser vers la gauche : corbeille, avec de quoi annuler
@@ -418,18 +446,19 @@ class E2eTest {
         waitText("2 messages archivés")
 
         // ---- rangement : archive, corbeille, suppression définitive
-        rule.onNodeWithText("Archives").performClick()
+        folder("archive")
         waitText("Rendez-vous jeudi")
         waitText("Réunion atelier")
         rule.onNodeWithText("Rendez-vous jeudi").performClick()
         rule.waitUntil(30_000) { vm.opened != null }
-        menu("Mettre à la corbeille")
+        rule.onNodeWithContentDescription("Mettre à la corbeille").performClick()
         waitText("Message mis à la corbeille")
-        rule.onNodeWithText("Corbeille").performClick()
+        rule.waitUntil(15_000) { vm.screen == Screen.Mailbox }
+        folder("trash")
         waitText("Rendez-vous jeudi")
         rule.onNodeWithText("Rendez-vous jeudi").performClick()
         rule.waitUntil(30_000) { vm.opened != null }
-        menu("Supprimer définitivement")
+        rule.onNodeWithContentDescription("Supprimer définitivement").performClick()
         waitText("Il sera effacé définitivement")
         // Le menu se referme : il ne doit rester que le bouton de la confirmation.
         rule.waitUntil(15_000) { rule.onAllNodesWithText("Supprimer définitivement").fetchSemanticsNodes().size == 1 }
@@ -439,11 +468,10 @@ class E2eTest {
         // ---- adresses et règles : une nouvelle adresse, une règle qui archive à l'arrivée
         // Le message de confirmation précédent s'affiche en bas de l'écran, là où se trouvent les boutons à venir.
         settle()
-        rule.onNodeWithText("Réception").performClick()
+        folder("inbox")
         waitText("Votre commande est partie")
 
         // ---- recherche : un mot qui ne figure que dans le texte d'un message
-        rule.onNodeWithContentDescription("Chercher dans ce dossier").performClick()
         rule.onNodeWithTag("recherche").performTextInput("festival")
         rule.waitUntil(30_000) {
             vm.messages.isNotEmpty() && vm.messages.any { it.subject.startsWith("Devis pour") } &&
@@ -451,19 +479,19 @@ class E2eTest {
         }
         shell("input keyevent 111")
         shot("16b-recherche-dans-le-texte")
-        rule.onNodeWithContentDescription("Chercher dans ce dossier").performClick()
+        rule.onNodeWithContentDescription("Effacer la recherche").performClick()
         rule.waitUntil(30_000) { vm.query.isEmpty() && vm.messages.any { it.subject.startsWith("Votre commande") } }
 
         // ---- dossiers personnels : en créer deux, dont un sous-dossier
         rule.onNodeWithTag("bouton-dossiers").performClick()
         waitText("Nouveau dossier")
         waitText("Aucun dossier pour l'instant")
-        rule.onNodeWithTag("nouveau-dossier").performClick()
+        rule.onNodeWithTag("nouveau-dossier").performScrollTo().performClick()
         waitText("Nom du dossier")
         rule.onNodeWithTag("nom-dossier").performTextInput("Clients")
         rule.onNodeWithText("Créer").performClick()
         rule.waitUntil(30_000) { vm.labels.any { it.name == "Clients" } && !vm.labelBusy }
-        rule.onNodeWithTag("nouveau-dossier").performClick()
+        rule.onNodeWithTag("nouveau-dossier").performScrollTo().performClick()
         waitText("Nom du dossier")
         rule.onNodeWithTag("nom-dossier").performTextInput("Clients/Affiches")
         rule.onNodeWithText("Créer").performClick()
@@ -497,14 +525,15 @@ class E2eTest {
         waitText("Re: Devis pour l'affiche")
         settle()
 
-        // ---- ouvrir le dossier : le message rangé s'y trouve, un bandeau dit où l'on est
+        // ---- ouvrir le dossier : le message rangé s'y trouve, le titre de la page dit où l'on est
         rule.onNodeWithTag("bouton-dossiers").performClick()
         waitText("Nouveau dossier")
-        rule.onNodeWithTag("dossier-Clients").performClick()
+        rule.onNodeWithTag("dossier-Clients").performScrollTo().performClick()
         rule.waitUntil(30_000) { labelIdOf(vm.folder) != null && vm.messages.any { it.subject.startsWith("Votre commande") } }
-        rule.onNodeWithTag("bandeau-dossier").assertTextContains("Clients")
+        waitGone("Nouveau dossier")
+        rule.onNodeWithTag("bouton-dossiers").assertTextContains("Clients")
         shot("16e-dans-un-dossier")
-        rule.onNodeWithContentDescription("Fermer le dossier et revenir à la réception").performClick()
+        folder("inbox")
         rule.waitUntil(30_000) { vm.folder == "inbox" && vm.messages.any { it.subject == "Re: Devis pour l'affiche" } }
         waitText("Réception")
 
@@ -554,14 +583,22 @@ class E2eTest {
         val elsewhere = loginElsewhere(password, "Tablette d'essai")
         assertTrue("le second appareil est connecté", accepted(elsewhere))
 
-        menu("Réglages")
-        waitText("Tes adresses")
+        tab("Réglages")
+        waitText("Thème")
+        shot("17-reglages")
+        rule.onNodeWithTag("reglage-adresses").performClick()
         waitText("adresse principale")
         rule.onNodeWithTag("alias-nom").performTextInput("contact")
         rule.onNodeWithText("Ajouter").performClick()
         waitText("contact@valentinlarge.com")
         // Les boutons restent éteints tant que le serveur n'a pas fini de répondre.
         rule.waitUntil(30_000) { !vm.settingsBusy }
+        shell("input keyevent 111")
+        shot("17a-adresses")
+        backToSettings()
+
+        rule.onNodeWithTag("reglage-regles").performClick()
+        waitText("Nouvelle règle")
         rule.onNodeWithTag("regle-texte").performScrollTo().performTextInput("infolettre")
         rule.onNodeWithText("Ajouter la règle").performScrollTo().performClick()
         waitText("contient « infolettre »")
@@ -577,13 +614,19 @@ class E2eTest {
         rule.onNodeWithText("Ajouter la règle").performScrollTo().performClick()
         waitText("ranger dans « Clients »")
         rule.waitUntil(30_000) { !vm.settingsBusy }
-        shot("17-adresses-et-regles")
+        shell("input keyevent 111")
+        shot("17a2-regles")
+        backToSettings()
+
+        rule.onNodeWithTag("reglage-signature").performClick()
         rule.onNodeWithTag("signature").performScrollTo().performTextInput("Valentin, essai")
         rule.onNodeWithText("Enregistrer la signature").performScrollTo().performClick()
         rule.waitUntil(30_000) { vm.signature == "Valentin, essai" && !vm.settingsBusy }
         settle()
+        backToSettings()
 
         // ---- appareils connectés : ce téléphone et la tablette ; on déconnecte la tablette d'ici
+        rule.onNodeWithTag("reglage-appareils").performScrollTo().performClick()
         rule.waitUntil(30_000) { vm.sessions.size == 2 && vm.sessions[0].current }
         rule.onNodeWithTag("deconnecter-Tablette d'essai").performScrollTo()
         waitText("cet appareil")
@@ -598,6 +641,7 @@ class E2eTest {
         waitText("Aucun autre appareil")
         rule.waitUntil(30_000) { !vm.settingsBusy }
         settle()
+        backToSettings()
 
         // ---- verrou : le téléphone vérifie l'identité avant de l'activer (ici, un téléphone d'essai qui dit oui ou non)
         val recognised = AtomicBoolean(true)
@@ -606,7 +650,17 @@ class E2eTest {
         rule.waitUntil(15_000) { vm.lockEnabled }
         shot("17c-verrou-active")
         settle()
-        rule.onNodeWithContentDescription("Retour à la boîte").performClick()
+
+        // ---- « Verrouiller maintenant » : l'appli se ferme tout de suite, et attend qu'on demande à rouvrir
+        rule.onNodeWithTag("verrouiller-maintenant").performScrollTo().performClick()
+        rule.waitUntil(15_000) { vm.locked }
+        waitText("La boîte est verrouillée")
+        rule.waitForIdle()
+        assertTrue("verrouillée à la main, l'appli ne se rouvre pas d'elle-même", vm.locked)
+        rule.onNodeWithTag("deverrouiller").performClick()
+        rule.waitUntil(15_000) { !vm.locked }
+        waitText("Thème")
+        tab("Courrier")
         waitText("Réception")
 
         // ---- de retour après une absence, l'appli ne montre plus rien tant que le téléphone ne reconnaît pas son propriétaire
@@ -640,13 +694,13 @@ class E2eTest {
             "X-Forwarded-To: valentin@valentinlarge.com",
             "X-Forwarded-For: boite.essai@gmail.example valentin@valentinlarge.com",
         )
-        menu("Actualiser")
+        refresh()
         waitText("Demande de devis")
         assertTrue("le message visé par la règle n'est pas en réception", vm.messages.none { it.subject == "Numero 7" })
         rule.waitUntil(30_000) { vm.messages.any { it.subject == "Demande de devis" && it.labels.size == 1 } }
-        rule.onNodeWithText("Archives").performClick()
+        folder("archive")
         waitText("Numero 7")
-        rule.onNodeWithText("Réception").performClick()
+        folder("inbox")
         waitText("Demande de devis")
 
         // ---- tri par boîte : l'adresse principale, une autre adresse du domaine, et le compte Gmail d'origine
@@ -657,13 +711,14 @@ class E2eTest {
         shot("17e-boites")
         rule.onNodeWithTag("boite-contact@valentinlarge.com").performScrollTo().performClick()
         rule.waitUntil(30_000) { boxOf(vm.folder) == "contact@valentinlarge.com" && vm.messages.map { it.subject } == listOf("Demande de devis") }
-        rule.onNodeWithTag("bandeau-dossier").assertTextContains("contact@valentinlarge.com")
+        waitGone("Nouveau dossier")
+        rule.onNodeWithTag("bouton-dossiers").assertTextContains("contact@valentinlarge.com")
         shot("17f-dans-une-boite")
-        rule.onNodeWithTag("bandeau-dossier").performClick()
+        rule.onNodeWithTag("bouton-dossiers").performClick()
         waitText("Nouveau dossier")
         rule.onNodeWithTag("boite-boite.essai@gmail.example").performScrollTo().performClick()
         rule.waitUntil(30_000) { boxOf(vm.folder) == "boite.essai@gmail.example" && vm.messages.map { it.subject } == listOf("Suivi par Gmail") }
-        rule.onNodeWithContentDescription("Fermer la boîte et revenir à la réception").performClick()
+        folder("inbox")
         rule.waitUntil(30_000) { vm.folder == "inbox" && vm.messages.any { it.subject == "Demande de devis" } }
         waitText("Réception")
 
@@ -677,7 +732,7 @@ class E2eTest {
         OkHttpClient().newCall(arrival).execute().use { assertEquals(200, it.code) }
 
         // ---- galerie des pièces jointes : reçues et envoyées, sans ouvrir les messages
-        menu("Pièces jointes")
+        tab("Pièces jointes")
         rule.waitUntil(30_000) {
             vm.screen == Screen.Gallery && !vm.galleryLoading && vm.gallery.any { it.name == "essai-piece.txt" } && vm.gallery.any { it.name == "photo.jpg" }
         }
@@ -733,7 +788,7 @@ class E2eTest {
         rule.waitUntil(30_000) { vm.screen is Screen.Reader && vm.opened != null }
         rule.onNodeWithContentDescription("Retour à la liste").performClick()
         rule.waitUntil(15_000) { vm.screen == Screen.Gallery }
-        rule.onNodeWithContentDescription("Retour à la boîte").performClick()
+        tab("Courrier")
         waitText("Réception")
 
         // ---- on répond depuis l'adresse qui a reçu le message
@@ -752,17 +807,42 @@ class E2eTest {
         settle()
         backToList()
 
-        // ---- thème sombre : l'appli suit le réglage du téléphone
+        // ---- thème sombre : en « Automatique », l'appli suit le réglage du téléphone
         shell("cmd uimode night yes")
         Thread.sleep(4000)
         waitText("Réception")
+        assertTrue("le thème suit le téléphone", Palette.dark)
         shot("19-theme-sombre")
         rule.onNodeWithText("Demande de devis").performClick()
         rule.waitUntil(30_000) { vm.opened != null }
         shot("20-theme-sombre-message")
         backToList()
+        rule.onNodeWithContentDescription("Écrire un message").performClick()
+        waitText("Nouveau message")
+        shell("input keyevent 111")
+        shot("20b-theme-sombre-ecrire")
+        closeComposer()
+        rule.waitUntil(15_000) { vm.screen == Screen.Mailbox }
+        tab("Pièces jointes")
+        rule.waitUntil(30_000) { vm.screen == Screen.Gallery && !vm.galleryLoading && vm.gallery.isNotEmpty() }
+        shot("20c-theme-sombre-pieces")
+        tab("Réglages")
+        waitText("Thème")
+        shot("20d-theme-sombre-reglages")
+
+        // ---- le thème se choisit aussi dans les réglages, quel que soit celui du téléphone
+        rule.onNodeWithTag("theme-light").performClick()
+        rule.waitUntil(15_000) { !Palette.dark && vm.prefs.themeMode == "light" }
+        shot("20e-theme-clair-impose")
         shell("cmd uimode night no")
         Thread.sleep(4000)
+        waitText("Thème")
+        rule.onNodeWithTag("theme-dark").performClick()
+        rule.waitUntil(15_000) { Palette.dark && vm.prefs.themeMode == "dark" }
+        shot("20f-theme-sombre-impose")
+        rule.onNodeWithTag("theme-auto").performClick()
+        rule.waitUntil(15_000) { !Palette.dark && vm.prefs.themeMode == "auto" }
+        tab("Courrier")
         waitText("Réception")
 
         // ---- « Partager » depuis une autre appli : Courrier s'ouvre par-dessus elle, dans une fenêtre à part,
@@ -819,7 +899,9 @@ class E2eTest {
 
         // ---- déconnexion : le serveur ferme aussi la session, le jeton du téléphone ne vaut plus rien
         val mine = vm.prefs.token!!
-        menu("Se déconnecter")
+        tab("Réglages")
+        waitText("Thème")
+        rule.onNodeWithText("Se déconnecter").performScrollTo().performClick()
         waitText("Ouvrir la boîte")
         assertTrue("le jeton de l'appli est refusé après la déconnexion", !accepted(mine))
     }

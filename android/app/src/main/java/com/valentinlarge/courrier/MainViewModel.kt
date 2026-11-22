@@ -94,8 +94,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         return true
     }
 
+    /** Vrai quand le verrou vient d'être mis à la main : l'écran attend alors qu'on demande à rouvrir. */
+    var lockQuiet by mutableStateOf(false)
+        private set
+
     fun unlock() {
         locked = false
+        lockQuiet = false
     }
 
     /** Active ou coupe le verrou ; l'écran des réglages a déjà fait vérifier l'identité par le téléphone. */
@@ -115,7 +120,53 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val since = leftAt
         leftAt = 0L
         if (repo.prefs.token != null) Push.listener = pushListener
-        if (!locked && since != 0L && SystemClock.elapsedRealtime() - since >= Lock.graceMs && mustLock()) locked = true
+        if (!locked && since != 0L && SystemClock.elapsedRealtime() - since >= Lock.graceMs && mustLock()) {
+            lockQuiet = false
+            locked = true
+        }
+    }
+
+    /** Verrouille tout de suite, à la demande. */
+    fun lockNow() {
+        if (mustLock()) {
+            lockQuiet = true
+            locked = true
+        }
+    }
+
+    // ---- thème
+    var themeMode by mutableStateOf(repo.prefs.themeMode)
+        private set
+
+    /** « auto » suit le téléphone ; « light » et « dark » imposent un thème. */
+    fun chooseTheme(mode: String) {
+        repo.prefs.themeMode = mode
+        themeMode = mode
+        Palette.mode = mode
+    }
+
+    // ---- pages
+    /** La page de fond : celle qu'on voit, ou celle qui attend sous un message ouvert ou une rédaction. */
+    val tab: Screen
+        get() = when (val now = screen) {
+            is Screen.Reader -> readerReturn
+            Screen.Compose -> when (val under = composeReturn) {
+                is Screen.Reader -> readerReturn
+                Screen.Gallery, Screen.Settings -> under
+                else -> Screen.Mailbox
+            }
+            Screen.Gallery, Screen.Settings -> now
+            else -> Screen.Mailbox
+        }
+
+    /** L'identifiant du message ouvert, y compris quand on lui répond par-dessus. */
+    val readerId: String?
+        get() = (screen as? Screen.Reader)?.id
+            ?: if (screen == Screen.Compose) (composeReturn as? Screen.Reader)?.id else null
+
+    /** Revient à la page du courrier depuis une autre page. */
+    fun goMailbox() {
+        if (screen == Screen.Gallery || screen == Screen.Settings) back()
     }
 
     /** Message bref affiché en bas de l'écran. */
@@ -957,10 +1008,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun back() {
         when (screen) {
             is Screen.Reader -> {
+                // Le message reste en mémoire le temps que son écran glisse hors de vue ; le prochain le remplacera.
                 readerJob?.cancel()
-                opened = null
                 readerError = null
-                thread = emptyList()
                 closeReader()
                 showLocal()
             }
@@ -990,8 +1040,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun leaveReader(done: String) {
         notice = done
-        opened = null
-        thread = emptyList()
         closeReader()
         showLocal()
         refresh()
@@ -1598,6 +1646,23 @@ fun shortDate(millis: Long): String {
 }
 
 fun longDate(millis: Long): String = longFormat.format(Instant.ofEpochMilli(millis).atZone(zone))
+
+private val monthFormat = DateTimeFormatter.ofPattern("MMMM", Locale.FRANCE)
+private val monthYearFormat = DateTimeFormatter.ofPattern("MMMM yyyy", Locale.FRANCE)
+
+/** Le groupe où ranger un message dans la liste : le jour pour les plus récents, le mois ensuite. */
+fun dayBucket(millis: Long): String {
+    val date = Instant.ofEpochMilli(millis).atZone(zone)
+    val day = date.toLocalDate()
+    val today = Instant.now().atZone(zone).toLocalDate()
+    return when {
+        !day.isBefore(today) -> "Aujourd'hui"
+        day == today.minusDays(1) -> "Hier"
+        day.isAfter(today.minusDays(7)) -> "Cette semaine"
+        day.year == today.year -> monthFormat.format(date).replaceFirstChar { it.uppercase() }
+        else -> monthYearFormat.format(date).replaceFirstChar { it.uppercase() }
+    }
+}
 
 fun fileSize(bytes: Long): String = when {
     bytes < 0 -> ""

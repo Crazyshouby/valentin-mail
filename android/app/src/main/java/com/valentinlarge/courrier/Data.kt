@@ -26,6 +26,10 @@ data class MailItem(
     val labels: List<String> = emptyList(),
     /** La boîte qui a reçu le message : une adresse du domaine, ou le compte Gmail d'où il vient. */
     val box: String = "",
+    /** Le début du texte du message, pour la liste ; vide tant que le serveur ne l'a pas relevé. */
+    val snippet: String = "",
+    /** Nombre de pièces jointes relevées par le serveur. */
+    val files: Int = 0,
 ) {
     val outgoing: Boolean get() = direction == "out"
 
@@ -236,6 +240,11 @@ class Prefs(context: Context) {
         get() = sp.getBoolean("asked_notifications", false)
         set(value) = sp.edit().putBoolean("asked_notifications", value).apply()
 
+    /** Le thème choisi : « auto » suit le téléphone, « light » et « dark » l'imposent. */
+    var themeMode: String
+        get() = sp.getString("theme", "auto") ?: "auto"
+        set(value) = sp.edit().putString("theme", value).apply()
+
     /** Vrai si l'appli demande l'empreinte (ou le code du téléphone) avant de montrer le courrier. */
     var lockEnabled: Boolean
         get() = sp.getBoolean("lock", false)
@@ -247,7 +256,7 @@ class Prefs(context: Context) {
 }
 
 /** Copie locale des listes de messages, pour la lecture hors connexion. */
-class Db(context: Context) : SQLiteOpenHelper(context, "courrier.db", null, 4) {
+class Db(context: Context) : SQLiteOpenHelper(context, "courrier.db", null, 5) {
 
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL(
@@ -265,7 +274,9 @@ class Db(context: Context) : SQLiteOpenHelper(context, "courrier.db", null, 4) {
                 thread_id TEXT NOT NULL,
                 thread_count INTEGER NOT NULL,
                 labels TEXT NOT NULL DEFAULT '',
-                box TEXT NOT NULL DEFAULT ''
+                box TEXT NOT NULL DEFAULT '',
+                snippet TEXT NOT NULL DEFAULT '',
+                files INTEGER NOT NULL DEFAULT 0
             )"""
         )
         db.execSQL("CREATE INDEX idx_messages_folder_date ON messages (folder, date DESC)")
@@ -292,9 +303,11 @@ class Db(context: Context) : SQLiteOpenHelper(context, "courrier.db", null, 4) {
         threadCount = getInt(11),
         labels = getString(12).split(',').filter { it.isNotEmpty() },
         box = getString(13),
+        snippet = getString(14),
+        files = getInt(15),
     )
 
-    private val columns = "id, folder, direction, from_addr, from_name, to_addr, subject, date, size, is_read, thread_id, thread_count, labels, box"
+    private val columns = "id, folder, direction, from_addr, from_name, to_addr, subject, date, size, is_read, thread_id, thread_count, labels, box, snippet, files"
 
     /** Ce qui désigne une vue dans la base : un dossier de la boîte, un dossier personnel ou une boîte d'origine (hors corbeille). */
     private fun scope(view: String): Pair<String, List<String>> {
@@ -346,6 +359,8 @@ class Db(context: Context) : SQLiteOpenHelper(context, "courrier.db", null, 4) {
         put("thread_count", item.threadCount)
         put("labels", item.labels.joinToString(","))
         put("box", item.box)
+        put("snippet", item.snippet)
+        put("files", item.files)
     }
 
     /** Les messages d'une conversation connus de l'appareil, du plus ancien au plus récent. */
