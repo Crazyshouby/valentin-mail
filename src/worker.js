@@ -12,6 +12,12 @@ const MAX_LOGIN_FAILURES = 8; // par adresse IP et par quart d'heure
 const PAGE_SIZE = 50;
 const MAX_RECIPIENTS = 20;
 const RESEND_URL = "https://api.resend.com/emails";
+const APP_SESSION_DAYS = 365; // l'appli reste connectée plus longtemps qu'un navigateur
+const MAX_UPLOAD_BYTES = 25 * 1024 * 1024; // par fichier joint
+const MAX_ATTACHMENTS = 10;
+const MAX_ATTACHMENTS_BYTES = 25 * 1024 * 1024; // total par message
+const ATTACHMENT_LINK_MS = 6 * 3600 * 1000;
+const ORPHAN_UPLOAD_MS = 24 * 3600 * 1000;
 
 export default {
   async email(message, env) {
@@ -76,6 +82,15 @@ async function route(request, env) {
   const url = new URL(request.url);
   const path = url.pathname;
 
+  const method = request.method.toUpperCase();
+
+  // Lien signé et temporaire vers une pièce jointe : c'est par là que le
+  // service d'envoi vient chercher les fichiers au moment de l'expédition.
+  if (path.startsWith("/att/")) {
+    if (method === "GET" && env.APP_PASSWORD) return signedAttachment(path.slice(5), url, env);
+    return new Response("Introuvable", { status: 404 });
+  }
+
   if (!path.startsWith("/api/")) {
     if (env.ASSETS) return env.ASSETS.fetch(request);
     return new Response("Introuvable", { status: 404 });
@@ -85,15 +100,16 @@ async function route(request, env) {
     return json({ error: "Le mot de passe du webmail n'est pas configuré (secret APP_PASSWORD)." }, 503);
   }
 
-  const method = request.method.toUpperCase();
-
-  // Les requêtes qui modifient quelque chose doivent venir de la page elle-même.
+  // Les requêtes qui modifient quelque chose doivent venir de la page elle-même,
+  // ou de l'appli : elle n'est pas un navigateur (pas d'en-tête Origin) et envoie
+  // un en-tête maison qu'une page web tierce ne peut pas ajouter.
+  const origin = request.headers.get("Origin");
+  const fromApp = !origin && Boolean(request.headers.get("X-Courrier-App"));
   if (method !== "GET" && method !== "HEAD") {
-    const origin = request.headers.get("Origin");
-    if (origin !== url.origin) return json({ error: "Origine de la requête refusée." }, 403);
+    if (origin !== url.origin && !fromApp) return json({ error: "Origine de la requête refusée." }, 403);
   }
 
-  if (path === "/api/login" && method === "POST") return login(request, env);
+  if (path === "/api/login" && method === "POST") return login(request, env, fromApp);
   if (path === "/api/logout" && method === "POST") return logout();
 
   const authed = await isAuthenticated(request, env);
@@ -112,8 +128,15 @@ async function route(request, env) {
   if (!authed) return json({ error: "Connexion requise." }, 401);
 
   if (path === "/api/messages" && method === "GET") return listMessages(url, env);
-  if (path === "/api/send" && method === "POST") return sendMessage(request, env);
+  if (path === "/api/send" && method === "POST") return sendMessage(request, url, env);
   if (path === "/api/trash/empty" && method === "POST") return emptyTrash(env);
+
+  const upload = path.match(/^\/api\/uploads\/([0-9a-f-]{36})$/);
+  if (upload) {
+    if (method === "PUT") return storeUpload(upload[1], request, url, env);
+    if (method === "GET") return readUpload(upload[1], env);
+    if (method === "DELETE") return removeUpload(upload[1], env);
+  }
 
   const match = path.match(/^\/api\/messages\/([0-9a-f-]{36})(\/raw)?$/);
   if (match) {
@@ -132,7 +155,7 @@ async function route(request, env) {
 
 // ---------------------------------------------------------------- connexion
 
-async function login(request, env) {
+async function login(request, env, fromApp = false) {
   const ip = request.headers.get("CF-Connecting-IP") || "inconnue";
   const now = Date.now();
 
@@ -156,7 +179,11 @@ async function login(request, env) {
     return json({ error: "Mot de passe incorrect." }, 401);
   }
 
-  const token = await createSession(env);
+  // L'appli reçoit son jeton dans la réponse ; le navigateur, dans un cookie
+  // que les scripts de la page ne peuvent pas lire.
+  if (fromApp) return json({ ok: true, token: await createSession(env, APP_SESSION_DAYS) });
+
+  const token = await createSession(env, SESSION_DAYS);
   return json(
     { ok: true },
     200,
@@ -179,14 +206,15 @@ async function sessionKey(env) {
   return crypto.subtle.importKey("raw", digest, { name: "HMAC", hash: "SHA-256" }, false, ["sign", "verify"]);
 }
 
-async function createSession(env) {
-  const expires = String(Date.now() + SESSION_DAYS * 24 * 3600 * 1000);
+async function createSession(env, days = SESSION_DAYS) {
+  const expires = String(Date.now() + days * 24 * 3600 * 1000);
   const signature = await crypto.subtle.sign("HMAC", await sessionKey(env), new TextEncoder().encode(expires));
   return `${expires}.${toBase64Url(new Uint8Array(signature))}`;
 }
 
 async function isAuthenticated(request, env) {
-  const token = readCookie(request, SESSION_COOKIE);
+  const bearer = (request.headers.get("Authorization") || "").match(/^Bearer\s+(\S+)$/i);
+  const token = bearer ? bearer[1] : readCookie(request, SESSION_COOKIE);
   if (!token) return false;
   const dot = token.indexOf(".");
   if (dot < 1) return false;
@@ -246,12 +274,17 @@ async function listMessages(url, env) {
 
   const q = (url.searchParams.get("q") || "").trim().slice(0, 100);
   const before = Number(url.searchParams.get("before")) || 0;
+  const after = Number(url.searchParams.get("after")) || 0;
 
   const where = ["folder = ?"];
   const params = [folder];
   if (before > 0) {
     where.push("date < ?");
     params.push(before);
+  }
+  if (after > 0) {
+    where.push("date > ?");
+    params.push(after);
   }
   if (q) {
     const like = "%" + q.replace(/[\\%_]/g, "\\$&") + "%";
@@ -285,7 +318,10 @@ async function getMessage(id, env) {
   const row = await findMessage(id, env);
   if (!row) return json({ error: "Message introuvable." }, 404);
   delete row.r2_key;
-  return json({ message: row });
+  const files = await env.DB.prepare("SELECT id, name, type, size FROM uploads WHERE message_id = ?1 ORDER BY rowid")
+    .bind(id)
+    .all();
+  return json({ message: row, attachments: files.results || [] });
 }
 
 async function rawMessage(id, env) {
@@ -337,8 +373,12 @@ async function deleteMessage(id, env) {
     return json({ ok: true, deleted: false });
   }
 
-  await env.MAIL_BUCKET.delete(row.r2_key);
-  await env.DB.prepare("DELETE FROM messages WHERE id = ?1").bind(id).run();
+  const files = await env.DB.prepare("SELECT id FROM uploads WHERE message_id = ?1").bind(id).all();
+  await env.MAIL_BUCKET.delete([row.r2_key, ...(files.results || []).map((f) => `uploads/${f.id}`)]);
+  await env.DB.batch([
+    env.DB.prepare("DELETE FROM uploads WHERE message_id = ?1").bind(id),
+    env.DB.prepare("DELETE FROM messages WHERE id = ?1").bind(id),
+  ]);
   return json({ ok: true, deleted: true });
 }
 
@@ -349,8 +389,14 @@ async function emptyTrash(env) {
     const batch = await env.DB.prepare("SELECT id, r2_key FROM messages WHERE folder = 'trash' LIMIT 100").all();
     const rows = batch.results || [];
     if (!rows.length) break;
-    await env.MAIL_BUCKET.delete(rows.map((r) => r.r2_key));
-    await env.DB.batch(rows.map((r) => env.DB.prepare("DELETE FROM messages WHERE id = ?1").bind(r.id)));
+    const marks = rows.map(() => "?").join(",");
+    const ids = rows.map((r) => r.id);
+    const files = await env.DB.prepare(`SELECT id FROM uploads WHERE message_id IN (${marks})`).bind(...ids).all();
+    await env.MAIL_BUCKET.delete([...rows.map((r) => r.r2_key), ...(files.results || []).map((f) => `uploads/${f.id}`)]);
+    await env.DB.batch([
+      env.DB.prepare(`DELETE FROM uploads WHERE message_id IN (${marks})`).bind(...ids),
+      env.DB.prepare(`DELETE FROM messages WHERE id IN (${marks})`).bind(...ids),
+    ]);
     removed += rows.length;
     if (rows.length < 100) break;
   }
@@ -360,7 +406,7 @@ async function emptyTrash(env) {
 
 // -------------------------------------------------------------------- envoi
 
-async function sendMessage(request, env) {
+async function sendMessage(request, url, env) {
   const sender = parseAddress(env.MAIL_FROM || "");
   if (!env.RESEND_API_KEY || !sender.address) {
     return json(
@@ -384,8 +430,31 @@ async function sendMessage(request, env) {
 
   const subject = String(body.subject || "").replace(/[\r\n]+/g, " ").trim().slice(0, 500);
   const text = String(body.text || "");
-  if (!subject && !text.trim()) return json({ error: "Le message est vide." }, 400);
   if (text.length > 500000) return json({ error: "Le message est trop long." }, 400);
+
+  // Pièces jointes : déjà déposées une à une par PUT /api/uploads/:id.
+  const fileIds = Array.isArray(body.attachment_ids) ? [...new Set(body.attachment_ids.map(String))] : [];
+  if (fileIds.length > MAX_ATTACHMENTS) {
+    return json({ error: `Pas plus de ${MAX_ATTACHMENTS} pièces jointes par message.` }, 400);
+  }
+  let files = [];
+  if (fileIds.length) {
+    if (fileIds.some((id) => !/^[0-9a-f-]{36}$/.test(id))) return json({ error: "Pièce jointe invalide." }, 400);
+    const found = await env.DB.prepare(
+      `SELECT id, name, type, size FROM uploads WHERE message_id IS NULL AND id IN (${fileIds.map(() => "?").join(",")})`
+    )
+      .bind(...fileIds)
+      .all();
+    files = fileIds.map((id) => (found.results || []).find((f) => f.id === id)).filter(Boolean);
+    if (files.length !== fileIds.length) {
+      return json({ error: "Une pièce jointe est introuvable sur le serveur. Rajoute-la, puis renvoie le message." }, 400);
+    }
+    if (files.reduce((total, f) => total + f.size, 0) > MAX_ATTACHMENTS_BYTES) {
+      return json({ error: "Les pièces jointes dépassent 25 Mo au total." }, 400);
+    }
+  }
+
+  if (!subject && !text.trim() && !files.length) return json({ error: "Le message est vide." }, 400);
 
   // Réponse : on rattache le message à la conversation d'origine.
   let inReplyTo = null;
@@ -402,6 +471,14 @@ async function sendMessage(request, env) {
   };
   if (cc.list.length) payload.cc = cc.list;
   if (inReplyTo) payload.headers = { "In-Reply-To": inReplyTo, References: inReplyTo };
+  if (files.length) {
+    // Le service d'envoi télécharge lui-même chaque fichier par un lien signé :
+    // rien de lourd ne transite par ce Worker.
+    const expires = Date.now() + ATTACHMENT_LINK_MS;
+    payload.attachments = await Promise.all(
+      files.map(async (f) => ({ filename: f.name, path: await attachmentLink(url.origin, f.id, expires, env) }))
+    );
+  }
 
   let response;
   try {
@@ -458,12 +535,132 @@ async function sendMessage(request, env) {
     )
       .bind(id, sender.address, sender.name, to.list.join(", ").slice(0, 320), payload.subject, now, bytes.byteLength, key)
       .run();
+    if (files.length) {
+      await env.DB.prepare(`UPDATE uploads SET message_id = ? WHERE id IN (${files.map(() => "?").join(",")})`)
+        .bind(id, ...files.map((f) => f.id))
+        .run();
+    }
   } catch (err) {
     stored = false;
     console.error("Copie dans Envoyés impossible :", err);
   }
 
   return json({ ok: true, stored });
+}
+
+// ----------------------------------------------------------- pièces jointes
+
+function cleanFileName(value) {
+  return String(value || "")
+    .replace(/[\u0000-\u001f\u007f\u202a-\u202e\u2066-\u2069]/g, "")
+    .replace(/[\\/]/g, "_")
+    .trim()
+    .slice(0, 150);
+}
+
+// Le fichier arrive en flux et part tel quel dans R2 : il n'est jamais chargé
+// en mémoire ici.
+async function storeUpload(id, request, url, env) {
+  const name = cleanFileName(url.searchParams.get("name")) || "piece-jointe";
+  const asked = (url.searchParams.get("type") || "").slice(0, 120);
+  const type = /^[\w.+-]+\/[\w.+-]+$/.test(asked) ? asked : "application/octet-stream";
+  const length = Number(request.headers.get("Content-Length"));
+
+  if (!request.body || !Number.isFinite(length) || length <= 0) {
+    return json({ error: "Fichier vide ou de taille inconnue." }, 400);
+  }
+  if (length > MAX_UPLOAD_BYTES) return json({ error: "Fichier trop lourd : 25 Mo maximum par pièce jointe." }, 413);
+
+  const existing = await env.DB.prepare("SELECT id FROM uploads WHERE id = ?1").bind(id).first();
+  if (existing) return json({ error: "Cette pièce jointe existe déjà." }, 409);
+
+  const object = await env.MAIL_BUCKET.put(`uploads/${id}`, request.body, { httpMetadata: { contentType: type } });
+  await env.DB.prepare(
+    "INSERT INTO uploads (id, message_id, name, type, size, created) VALUES (?1, NULL, ?2, ?3, ?4, ?5)"
+  )
+    .bind(id, name, type, object.size, Date.now())
+    .run();
+
+  // Ménage : les fichiers déposés mais jamais envoyés disparaissent au bout d'un jour.
+  const stale = await env.DB.prepare("SELECT id FROM uploads WHERE message_id IS NULL AND created < ?1 LIMIT 20")
+    .bind(Date.now() - ORPHAN_UPLOAD_MS)
+    .all();
+  const staleIds = (stale.results || []).map((r) => r.id);
+  if (staleIds.length) {
+    await env.MAIL_BUCKET.delete(staleIds.map((x) => `uploads/${x}`));
+    await env.DB.prepare(`DELETE FROM uploads WHERE id IN (${staleIds.map(() => "?").join(",")})`)
+      .bind(...staleIds)
+      .run();
+  }
+
+  return json({ ok: true, id, name, type, size: object.size });
+}
+
+function fileResponse(object, name) {
+  const headers = {
+    "Content-Type": (object.httpMetadata && object.httpMetadata.contentType) || "application/octet-stream",
+    "X-Content-Type-Options": "nosniff",
+    "Cache-Control": "private, no-store",
+  };
+  headers["Content-Disposition"] = name
+    ? `attachment; filename*=UTF-8''${encodeURIComponent(name)}`
+    : "attachment";
+  return new Response(object.body, { headers });
+}
+
+async function readUpload(id, env) {
+  const row = await env.DB.prepare("SELECT name FROM uploads WHERE id = ?1").bind(id).first();
+  if (!row) return json({ error: "Pièce jointe introuvable." }, 404);
+  const object = await env.MAIL_BUCKET.get(`uploads/${id}`);
+  if (!object) return json({ error: "Pièce jointe introuvable dans le stockage." }, 404);
+  return fileResponse(object, row.name);
+}
+
+// Retirer une pièce jointe d'un brouillon : seulement tant que le message n'est pas parti.
+async function removeUpload(id, env) {
+  const row = await env.DB.prepare("SELECT message_id FROM uploads WHERE id = ?1").bind(id).first();
+  if (!row) return json({ ok: true });
+  if (row.message_id) return json({ error: "Cette pièce jointe fait partie d'un message envoyé." }, 409);
+  await env.MAIL_BUCKET.delete(`uploads/${id}`);
+  await env.DB.prepare("DELETE FROM uploads WHERE id = ?1").bind(id).run();
+  return json({ ok: true });
+}
+
+async function attachmentKey(env) {
+  const material = new TextEncoder().encode("valentin-mail-attachment:" + env.APP_PASSWORD);
+  const digest = await crypto.subtle.digest("SHA-256", material);
+  return crypto.subtle.importKey("raw", digest, { name: "HMAC", hash: "SHA-256" }, false, ["sign", "verify"]);
+}
+
+async function attachmentLink(origin, id, expires, env) {
+  const signature = await crypto.subtle.sign(
+    "HMAC",
+    await attachmentKey(env),
+    new TextEncoder().encode(`${id}.${expires}`)
+  );
+  return `${origin}/att/${id}?e=${expires}&s=${toBase64Url(new Uint8Array(signature))}`;
+}
+
+async function signedAttachment(id, url, env) {
+  const missing = new Response("Introuvable", { status: 404 });
+  const expires = url.searchParams.get("e") || "";
+  const signature = url.searchParams.get("s") || "";
+  if (!/^[0-9a-f-]{36}$/.test(id) || !/^\d{10,16}$/.test(expires) || Number(expires) < Date.now()) return missing;
+  let valid = false;
+  try {
+    valid = await crypto.subtle.verify(
+      "HMAC",
+      await attachmentKey(env),
+      fromBase64Url(signature),
+      new TextEncoder().encode(`${id}.${expires}`)
+    );
+  } catch {
+    valid = false;
+  }
+  if (!valid) return missing;
+  const object = await env.MAIL_BUCKET.get(`uploads/${id}`);
+  if (!object) return missing;
+  return fileResponse(object, "");
 }
 
 function parseRecipients(value) {
