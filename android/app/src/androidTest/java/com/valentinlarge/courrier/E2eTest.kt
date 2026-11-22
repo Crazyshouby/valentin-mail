@@ -15,6 +15,7 @@ import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.swipeLeft
@@ -385,8 +386,10 @@ class E2eTest {
         rule.onNodeWithTag("alias-nom").performTextInput("contact")
         rule.onNodeWithText("Ajouter").performClick()
         waitText("contact@valentinlarge.com")
-        rule.onNodeWithTag("regle-texte").performTextInput("infolettre")
-        rule.onNodeWithText("Ajouter la règle").performClick()
+        rule.onNodeWithTag("regle-texte").performScrollTo().performTextInput("infolettre")
+        shell("input keyevent 111")
+        // Le bouton est en bas d'une page qui défile : on l'amène à l'écran avant de le toucher.
+        rule.onNodeWithText("Ajouter la règle").performScrollTo().performClick()
         waitText("contient « infolettre »")
         shell("input keyevent 111")
         shot("17-adresses-et-regles")
