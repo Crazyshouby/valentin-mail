@@ -54,6 +54,12 @@ Le transfert ne concerne que les messages à venir. Pour les anciens, ouvre `/im
 
 En plus de Réception, Envoyés, Archives et Corbeille, la boîte accepte tes propres dossiers. Un message peut être rangé dans plusieurs ; « Finances/Énergie » crée un sous-dossier. Une règle de tri peut ranger à l'arrivée, en laissant ou non le message en réception. Les dossiers se gèrent depuis l'appli Android ; le webmail ne les affiche pas encore.
 
+### Boîtes, pièces jointes, appareils
+
+- **Boîtes** : chaque message retient la boîte d'où il vient — l'adresse du domaine qui l'a reçu, ou le compte Gmail qui l'a transféré (Gmail l'écrit dans l'en-tête `X-Forwarded-For`) ou d'où il a été importé. L'appli peut ainsi montrer le courrier boîte par boîte.
+- **Pièces jointes** : le serveur tient l'inventaire des pièces jointes (nom, type, taille, emplacement dans le message), sans jamais les décoder. Les petits messages sont relevés à l'arrivée ; les lourds, et ceux arrivés avant cet inventaire, le sont peu à peu. Une pièce se télécharge seule, sans le reste du message.
+- **Appareils** : chaque connexion ouvre une session propre à l'appareil, visible dans l'appli (« Appareils connectés ») et qu'on peut fermer à distance. Fermer une session coupe aussi ses notifications. « Déconnecter les autres » ferme tout, y compris les connexions plus anciennes que cette liste.
+
 ### Options
 
 - **Ouvrir le webmail sur ton domaine** : dans `wrangler.jsonc`, retire les `//` devant la ligne `routes`, puis redéploie. Le webmail répond alors sur `courrier.valentinlarge.com`.
