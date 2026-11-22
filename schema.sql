@@ -24,3 +24,16 @@ CREATE TABLE IF NOT EXISTS login_failures (
 );
 
 CREATE INDEX IF NOT EXISTS idx_login_failures_ip_ts ON login_failures (ip, ts);
+
+-- Pièces jointes des messages envoyés (le fichier lui-même vit dans R2, sous uploads/<id>).
+-- message_id reste vide tant que le message n'est pas parti.
+CREATE TABLE IF NOT EXISTS uploads (
+  id          TEXT PRIMARY KEY,
+  message_id  TEXT,
+  name        TEXT NOT NULL,
+  type        TEXT NOT NULL DEFAULT 'application/octet-stream',
+  size        INTEGER NOT NULL DEFAULT 0,
+  created     INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_uploads_message ON uploads (message_id);
