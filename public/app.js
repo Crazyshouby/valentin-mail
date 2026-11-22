@@ -138,9 +138,16 @@ function renderLogin(notice = "") {
     id: "password",
     type: "password",
     autocomplete: "current-password",
+    autocapitalize: "none",
+    autocorrect: "off",
+    spellcheck: "false",
     required: true,
   });
   const button = h("button", { class: "btn btn-primary", type: "submit" }, "Ouvrir la boîte");
+  const reveal = h("input", { type: "checkbox", id: "reveal-password" });
+  reveal.addEventListener("change", () => {
+    input.type = reveal.checked ? "text" : "password";
+  });
 
   const form = h(
     "form",
@@ -164,6 +171,7 @@ function renderLogin(notice = "") {
       },
     },
     h("div", { class: "field" }, h("label", { for: "password" }, "Mot de passe"), input),
+    h("label", { class: "check", for: "reveal-password" }, reveal, "Afficher le mot de passe"),
     error,
     button
   );

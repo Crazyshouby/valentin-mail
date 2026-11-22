@@ -148,7 +148,7 @@ async function login(request, env) {
   const body = await readJson(request);
   const password = body && typeof body.password === "string" ? body.password : "";
 
-  if (!(await sameSecret(password, env.APP_PASSWORD))) {
+  if (!(await sameSecret(tidySecret(password), tidySecret(env.APP_PASSWORD)))) {
     await env.DB.batch([
       env.DB.prepare("INSERT INTO login_failures (ip, ts) VALUES (?1, ?2)").bind(ip, now),
       env.DB.prepare("DELETE FROM login_failures WHERE ts < ?1").bind(now - LOGIN_WINDOW_MS),
@@ -203,6 +203,12 @@ async function isAuthenticated(request, env) {
   } catch {
     return false;
   }
+}
+
+// Un espace ou un retour à la ligne glissé au début ou à la fin (clavier de
+// téléphone, copier-coller) ne doit pas fausser la comparaison.
+function tidySecret(value) {
+  return String(value == null ? "" : value).normalize("NFC").trim();
 }
 
 async function sameSecret(a, b) {
