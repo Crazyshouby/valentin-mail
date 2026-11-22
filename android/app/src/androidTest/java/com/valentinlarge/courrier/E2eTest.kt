@@ -1,6 +1,7 @@
 package com.valentinlarge.courrier
 
 import android.accessibilityservice.AccessibilityService
+import android.app.Activity
 import android.app.Notification
 import android.app.NotificationManager
 import android.content.ContentValues
@@ -716,21 +717,35 @@ class E2eTest {
         Thread.sleep(4000)
         waitText("Réception")
 
-        // ---- « Partager » quand l'appli n'est ouverte que pour cela : une fenêtre à part, qui se referme une fois le message parti
-        val solo = Intent(Intent.ACTION_SEND)
-            .setType("text/plain")
-            .setClass(context, MainActivity::class.java)
-            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_MULTIPLE_TASK)
-            .putExtra(Intent.EXTRA_EMAIL, arrayOf("ami@example.com"))
-            .putExtra(Intent.EXTRA_SUBJECT, "Photo de vacances")
-            .putExtra(Intent.EXTRA_TEXT, "Regarde celle-ci.")
-        context.startActivity(solo)
+        // ---- « Partager » depuis une autre appli : Courrier s'ouvre par-dessus elle, dans une fenêtre à part,
+        // et lui rend la main une fois le message parti. Une fenêtre vide joue ici l'autre appli.
+        val registry = ActivityLifecycleMonitorRegistry.getInstance()
+        context.startActivity(
+            Intent().setClassName(context, "androidx.activity.ComponentActivity")
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_MULTIPLE_TASK),
+        )
+        var elsewhereApp: Activity? = null
+        rule.waitUntil(30_000) {
+            instrumentation.runOnMainSync {
+                elsewhereApp = registry.getActivitiesInStage(Stage.RESUMED).firstOrNull { it !is MainActivity }
+            }
+            elsewhereApp != null
+        }
+        val host = elsewhereApp!!
+        instrumentation.runOnMainSync {
+            host.startActivity(
+                Intent(Intent.ACTION_SEND)
+                    .setType("text/plain")
+                    .setPackage(context.packageName)
+                    .putExtra(Intent.EXTRA_EMAIL, arrayOf("ami@example.com"))
+                    .putExtra(Intent.EXTRA_SUBJECT, "Photo de vacances")
+                    .putExtra(Intent.EXTRA_TEXT, "Regarde celle-ci."),
+            )
+        }
         var apart: MainActivity? = null
         rule.waitUntil(30_000) {
             instrumentation.runOnMainSync {
-                apart = ActivityLifecycleMonitorRegistry.getInstance().getActivitiesInStage(Stage.RESUMED)
-                    .filterIsInstance<MainActivity>()
-                    .firstOrNull { it !== rule.activity }
+                apart = registry.getActivitiesInStage(Stage.RESUMED).filterIsInstance<MainActivity>().firstOrNull { it !== rule.activity }
             }
             apart != null
         }
@@ -738,10 +753,18 @@ class E2eTest {
         rule.waitUntil(30_000) { window.viewModel.screen == Screen.Compose && window.viewModel.draftSubject == "Photo de vacances" }
         assertEquals("ami@example.com", window.viewModel.draftTo)
         assertTrue("le texte partagé précède la signature", window.viewModel.draftText.startsWith("Regarde celle-ci.\n\n-- \nValentin, essai"))
+        assertTrue("la première fenêtre n'a rien reçu", vm.screen == Screen.Mailbox && vm.draftSubject.isEmpty())
         shot("21-partage-fenetre-a-part")
         rule.onNodeWithTag("envoyer").performClick()
         rule.waitUntil(60_000) { window.isFinishing || window.isDestroyed }
-        // La première fenêtre revient devant, telle qu'on l'avait laissée.
+        // L'autre appli retrouve la main ; on la referme, et la première fenêtre revient telle qu'on l'avait laissée.
+        rule.waitUntil(30_000) {
+            var back = false
+            instrumentation.runOnMainSync { back = registry.getActivitiesInStage(Stage.RESUMED).contains(host) }
+            back
+        }
+        instrumentation.runOnMainSync { host.finish() }
+        rule.waitUntil(30_000) { host.isDestroyed }
         context.startActivity(Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP))
         waitText("Réception")
         assertTrue("la boîte d'origine n'a pas bougé", vm.screen == Screen.Mailbox)
