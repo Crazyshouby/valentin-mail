@@ -13,12 +13,14 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ColorScheme
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Shapes
 import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -172,7 +174,11 @@ fun CourrierTheme(content: @Composable () -> Unit) {
     LaunchedEffect(target) {
         if (Palette.shade != target) animate(Palette.shade, target, animationSpec = tween(350)) { value, _ -> Palette.shade = value }
     }
-    MaterialTheme(colorScheme = scheme(), typography = typography, shapes = shapes, content = content)
+    MaterialTheme(colorScheme = scheme(), typography = typography, shapes = shapes) {
+        // Posé directement sur le fond, sans surface Material autour, un texte ou un pictogramme
+        // prendrait du noir : il prend l'encre du thème, claire quand le fond est sombre.
+        CompositionLocalProvider(LocalContentColor provides Ink, content = content)
+    }
 }
 
 /** Le liseré « par avion » : rayures obliques rouges et bleues ; [shift] (de 0 à 1) le fait défiler d'un motif. */

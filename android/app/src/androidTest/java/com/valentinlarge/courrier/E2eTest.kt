@@ -161,6 +161,25 @@ class E2eTest {
         return Triple(bitmap.width, bitmap.height, bitmap.getPixel(bitmap.width / 2, bitmap.height / 2))
     }
 
+    /** Vrai si la zone d'un élément porte des points très clairs : du texte lisible sur un fond sombre. */
+    private fun hasLightInk(tag: String): Boolean {
+        rule.waitForIdle()
+        val bounds = rule.onNodeWithTag(tag).fetchSemanticsNode().boundsInWindow
+        val screen = instrumentation.uiAutomation.takeScreenshot() ?: error("Pas de capture d'écran.")
+        val bitmap = screen.copy(Bitmap.Config.ARGB_8888, false)
+        var y = bounds.top.toInt().coerceAtLeast(0)
+        while (y < bounds.bottom.toInt().coerceAtMost(bitmap.height)) {
+            var x = bounds.left.toInt().coerceAtLeast(0)
+            while (x < bounds.right.toInt().coerceAtMost(bitmap.width)) {
+                val pixel = bitmap.getPixel(x, y)
+                if (Color.red(pixel) > 200 && Color.green(pixel) > 200 && Color.blue(pixel) > 200) return true
+                x += 2
+            }
+            y += 2
+        }
+        return false
+    }
+
     private fun closeComposer() {
         rule.onNodeWithContentDescription("Fermer la rédaction").performClick()
     }
@@ -813,6 +832,7 @@ class E2eTest {
         waitText("Réception")
         assertTrue("le thème suit le téléphone", Palette.dark)
         shot("19-theme-sombre")
+        assertTrue("en sombre, le titre de la page s'écrit en clair", hasLightInk("bouton-dossiers"))
         rule.onNodeWithText("Demande de devis").performClick()
         rule.waitUntil(30_000) { vm.opened != null }
         shot("20-theme-sombre-message")

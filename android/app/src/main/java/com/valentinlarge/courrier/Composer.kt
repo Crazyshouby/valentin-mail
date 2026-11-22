@@ -44,6 +44,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -64,6 +65,7 @@ fun ComposeScreen(vm: MainViewModel) {
     }
     var confirmDiscard by remember { mutableStateOf(false) }
     val sending = vm.sending
+    val narrow = LocalConfiguration.current.screenWidthDp < 400
     // L'avion part vers le coin de l'écran ; il revient d'un coup, sans faire le trajet à l'envers.
     val flight by animateFloatAsState(
         if (sending) 1f else 0f,
@@ -86,12 +88,12 @@ fun ComposeScreen(vm: MainViewModel) {
             Text(
                 if (vm.draftReplyTo != null) "Réponse" else "Nouveau message",
                 modifier = Modifier.weight(1f).padding(start = 2.dp),
-                style = MaterialTheme.typography.titleLarge,
+                // Sur un écran étroit, le titre se fait un peu plus petit pour tenir à côté du bouton d'envoi.
+                style = if (narrow) MaterialTheme.typography.titleLarge.copy(fontSize = 17.sp) else MaterialTheme.typography.titleLarge,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
-            GlyphButton(Glyphs.Trash, "Supprimer le brouillon", onClick = { confirmDiscard = true }, enabled = !sending, tint = Muted)
-            Spacer(Modifier.width(4.dp))
+            Spacer(Modifier.width(8.dp))
             Pill(
                 if (sending) "Patiente…" else "Envoyer",
                 onClick = { vm.send() },
@@ -212,7 +214,7 @@ fun ComposeScreen(vm: MainViewModel) {
 
         Hairline()
         Row(
-            Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 16.dp, vertical = 10.dp),
+            Modifier.fillMaxWidth().navigationBarsPadding().padding(start = 16.dp, end = 6.dp, top = 10.dp, bottom = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Pill(
@@ -223,6 +225,8 @@ fun ComposeScreen(vm: MainViewModel) {
                 filled = false,
                 height = 44.dp,
             )
+            Spacer(Modifier.weight(1f))
+            GlyphButton(Glyphs.Trash, "Supprimer le brouillon", onClick = { confirmDiscard = true }, enabled = !sending, tint = Muted)
         }
     }
 
