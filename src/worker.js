@@ -1394,17 +1394,26 @@ function forwardedBox(forwardedFor, recipient) {
   return "";
 }
 
-// Les boîtes qui ont reçu du courrier : l'adresse principale, les autres adresses du domaine, et les
-// comptes extérieurs (Gmail) dont le courrier arrive ici par transfert ou par import.
+// Les boîtes de la liste : l'adresse principale et les autres adresses du domaine, qu'elles aient déjà
+// reçu du courrier ou non, puis les comptes extérieurs (Gmail) dont le courrier arrive ici par transfert
+// ou par import.
 async function listBoxes(env) {
-  const rows = await env.DB.prepare(
-    `SELECT box AS address, COUNT(*) AS total, COALESCE(SUM(is_read = 0), 0) AS unread
-     FROM messages WHERE direction = 'in' AND folder != 'trash' AND box IS NOT NULL AND box != '' GROUP BY box`
-  ).all();
+  const [rows, aliases] = await env.DB.batch([
+    env.DB.prepare(
+      `SELECT box AS address, COUNT(*) AS total, COALESCE(SUM(is_read = 0), 0) AS unread
+       FROM messages WHERE direction = 'in' AND folder != 'trash' AND box IS NOT NULL AND box != '' GROUP BY box`
+    ),
+    env.DB.prepare("SELECT address FROM aliases ORDER BY created"),
+  ]);
   const main = mainAddress(env);
   const domain = ownDomain(env);
+  const counts = new Map((rows.results || []).map((r) => [r.address, r]));
+  // Une adresse du domaine sans courrier figure quand même dans la liste, avec zéro message.
+  for (const address of [main, ...(aliases.results || []).map((r) => r.address)]) {
+    if (address && address.endsWith("@" + domain) && !counts.has(address)) counts.set(address, { address, total: 0, unread: 0 });
+  }
   const rank = { main: 0, alias: 1, outside: 2 };
-  const boxes = (rows.results || []).map((r) => ({
+  const boxes = [...counts.values()].map((r) => ({
     address: r.address,
     kind: r.address === main ? "main" : r.address.endsWith("@" + domain) ? "alias" : "outside",
     total: r.total,
