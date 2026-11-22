@@ -53,3 +53,20 @@ CREATE TABLE IF NOT EXISTS uploads (
 );
 
 CREATE INDEX IF NOT EXISTS idx_uploads_message ON uploads (message_id);
+
+-- Adresses du domaine qui reçoivent du courrier ; une adresse coupée refuse les messages.
+CREATE TABLE IF NOT EXISTS aliases (
+  address TEXT PRIMARY KEY,
+  label   TEXT NOT NULL DEFAULT '',
+  enabled INTEGER NOT NULL DEFAULT 1,
+  created INTEGER NOT NULL
+);
+
+-- Règles de tri appliquées à l'arrivée : la première qui correspond l'emporte.
+CREATE TABLE IF NOT EXISTS rules (
+  id      TEXT PRIMARY KEY,
+  field   TEXT NOT NULL,   -- from | to | subject
+  value   TEXT NOT NULL,   -- texte à repérer, sans tenir compte des majuscules
+  action  TEXT NOT NULL,   -- archive | trash | read | block
+  created INTEGER NOT NULL
+);
