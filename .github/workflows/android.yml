@@ -1,0 +1,25 @@
+name: Appli Android
+
+on:
+  push:
+    branches: [android-app]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Construction et tests
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SIGNING_PASSPHRASE: ${{ secrets.SIGNING_PASSPHRASE }}
+        run: bash android/ci/run.sh
