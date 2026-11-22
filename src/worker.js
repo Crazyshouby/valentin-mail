@@ -22,8 +22,10 @@ const THREAD_WINDOW_MS = 60 * 24 * 3600 * 1000; // au-delà, un même objet ouvr
 const MAX_BATCH = 100;
 
 export default {
-  async email(message, env) {
-    await receive(message, env);
+  async email(message, env, ctx) {
+    const fresh = await receive(message, env);
+    // Un nouveau message en réception : on prévient le téléphone, sans retarder la réponse au serveur expéditeur.
+    if (fresh) ctx.waitUntil(pushNewMail(env).catch((err) => console.error("Notification non envoyée :", err)));
   },
 
   async fetch(request, env) {
@@ -120,6 +122,111 @@ async function receive(message, env) {
       .run()
       .catch((err) => console.error("Adresse non enregistrée :", err));
   }
+
+  return folder === "inbox" && !read;
+}
+
+// ------------------------------------------------- notifications poussées
+
+const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
+const FCM_URL = "https://fcm.googleapis.com";
+const MAX_DEVICES = 10;
+
+// Jeton d'accès Google, obtenu en signant une demande avec la clé du compte de service
+// (secret FCM_SERVICE_ACCOUNT). Il vaut une heure : on le garde pour ne pas signer à chaque mail.
+async function googleAccessToken(env, account) {
+  const now = Date.now();
+  const cached = await env.DB.prepare("SELECT value FROM cache WHERE key = 'fcm_token' AND expires > ?1")
+    .bind(now + 60000)
+    .first();
+  if (cached) return cached.value;
+
+  const enc = new TextEncoder();
+  const issued = Math.floor(now / 1000);
+  const header = toBase64Url(enc.encode(JSON.stringify({ alg: "RS256", typ: "JWT" })));
+  const claims = toBase64Url(
+    enc.encode(
+      JSON.stringify({
+        iss: account.client_email,
+        scope: "https://www.googleapis.com/auth/firebase.messaging",
+        aud: account.token_uri || GOOGLE_TOKEN_URL,
+        iat: issued,
+        exp: issued + 3600,
+      })
+    )
+  );
+  const pem = String(account.private_key || "").replace(/-----[A-Z ]+-----/g, "").replace(/\s+/g, "");
+  const key = await crypto.subtle.importKey(
+    "pkcs8",
+    Uint8Array.from(atob(pem), (c) => c.charCodeAt(0)),
+    { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  const signature = new Uint8Array(await crypto.subtle.sign("RSASSA-PKCS1-v1_5", key, enc.encode(`${header}.${claims}`)));
+
+  const response = await fetch(env.FCM_TOKEN_URL || account.token_uri || GOOGLE_TOKEN_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+      assertion: `${header}.${claims}.${toBase64Url(signature)}`,
+    }).toString(),
+  });
+  if (!response.ok) throw new Error(`Google a refusé la clé du compte de service (${response.status}).`);
+  const data = await response.json();
+  await env.DB.prepare("INSERT OR REPLACE INTO cache (key, value, expires) VALUES ('fcm_token', ?1, ?2)")
+    .bind(data.access_token, now + (Number(data.expires_in) || 3600) * 1000)
+    .run();
+  return data.access_token;
+}
+
+// Prévient chaque téléphone déclaré qu'un message est arrivé. Le signal ne contient rien du
+// message : l'appli vient ensuite le chercher elle-même sur ce serveur.
+async function pushNewMail(env) {
+  if (!env.FCM_SERVICE_ACCOUNT) return { sent: 0 };
+  let account;
+  try {
+    account = JSON.parse(env.FCM_SERVICE_ACCOUNT);
+  } catch {
+    throw new Error("Le secret FCM_SERVICE_ACCOUNT n'est pas un fichier de clé valide.");
+  }
+  const devices = await env.DB.prepare(`SELECT token FROM devices ORDER BY created DESC LIMIT ${MAX_DEVICES}`).all();
+  const tokens = (devices.results || []).map((d) => d.token);
+  if (!tokens.length) return { sent: 0 };
+
+  const access = await googleAccessToken(env, account);
+  const url = `${env.FCM_API_URL || FCM_URL}/v1/projects/${account.project_id}/messages:send`;
+  let sent = 0;
+  for (const token of tokens) {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${access}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ message: { token, android: { priority: "HIGH" }, data: { type: "new-mail" } } }),
+    });
+    if (response.ok) {
+      sent++;
+    } else if (response.status === 404) {
+      // L'appli a été désinstallée ou son jeton a changé : ce téléphone n'est plus à prévenir.
+      await env.DB.prepare("DELETE FROM devices WHERE token = ?1").bind(token).run();
+    } else {
+      if (response.status === 401) await env.DB.prepare("DELETE FROM cache WHERE key = 'fcm_token'").run();
+      console.error("Notification refusée :", response.status, (await response.text()).slice(0, 300));
+    }
+  }
+  return { sent };
+}
+
+async function saveDevice(request, env, remove) {
+  const body = await readJson(request);
+  const token = body && typeof body.token === "string" ? body.token.trim() : "";
+  if (!/^[A-Za-z0-9_:.\-]{20,4096}$/.test(token)) return json({ error: "Identifiant d'appareil invalide." }, 400);
+  if (remove) {
+    await env.DB.prepare("DELETE FROM devices WHERE token = ?1").bind(token).run();
+  } else {
+    await env.DB.prepare("INSERT OR REPLACE INTO devices (token, created) VALUES (?1, ?2)").bind(token, Date.now()).run();
+  }
+  return json({ ok: true, push: Boolean(env.FCM_SERVICE_ACCOUNT) });
 }
 
 // ------------------------------------------------------- adresses et règles
@@ -280,6 +387,7 @@ async function route(request, env) {
       from: env.MAIL_FROM || "",
       address: from.address,
       addresses: await sendingAddresses(env),
+      push: Boolean(env.FCM_SERVICE_ACCOUNT),
       canSend: Boolean(env.RESEND_API_KEY && from.address),
     });
   }
@@ -291,6 +399,7 @@ async function route(request, env) {
   if (path === "/api/trash/empty" && method === "POST") return emptyTrash(env);
   if (path === "/api/messages/batch" && method === "POST") return batchMessages(request, env);
   if (path === "/api/drafts" && method === "GET") return listDrafts(env);
+  if (path === "/api/devices" && (method === "PUT" || method === "DELETE")) return saveDevice(request, env, method === "DELETE");
   if (path === "/api/aliases" && method === "GET") return listAliases(env);
   if (path === "/api/rules" && method === "GET") return listRules(env);
 
