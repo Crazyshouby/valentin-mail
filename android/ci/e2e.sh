@@ -82,7 +82,7 @@ if grep -q "^OK (" "$OUT/instrument.log" && ! grep -q "FAILURES" "$OUT/instrumen
       throw new Error("transfert sans sa pièce jointe : " + JSON.stringify(forwarded && forwarded.fetched));
     }
     const draft = lines.find((l) => l.body.subject === "Idée à creuser");
-    if (!draft || !String(draft.body.to).includes("plus-tard@example.com")) throw new Error("le brouillon repris n'est pas parti");
+    if (!draft || !String(draft.body.to).includes("plus-tard@example.com")) throw new Error("le brouillon repris est resté sur place");
     console.log("Transfert et brouillon vérifiés.");
   ' "$OUT/resend.log" && status=0
 else
