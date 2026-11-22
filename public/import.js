@@ -42,6 +42,7 @@ let running = false;
 let paused = false;
 let indexing = false;
 let wakeLock = null;
+let lastIntent = { kind: "all" }; // ce qu'on importait en dernier : tout, ou un seul dossier
 
 // ------------------------------------------------------------ ce serveur
 
@@ -146,6 +147,7 @@ function connect() {
 // (il disparaît à sa fermeture) et on nettoie l'adresse.
 function takeToken() {
   let error = "";
+  let fresh = false;
   if (location.hash.length > 1) {
     const answer = new URLSearchParams(location.hash.slice(1));
     history.replaceState(null, "", location.pathname);
@@ -159,17 +161,51 @@ function takeToken() {
       } else {
         const expires = Date.now() + (Number(answer.get("expires_in")) || 3600) * 1000 - 60000;
         sessionStorage.setItem("import_token", JSON.stringify({ token: answer.get("access_token"), expires }));
+        fresh = true;
       }
     }
   }
   try {
     const saved = JSON.parse(sessionStorage.getItem("import_token") || "null");
-    if (saved && saved.expires > Date.now()) return { token: saved.token, error };
+    if (saved && saved.expires > Date.now()) return { token: saved.token, error, fresh };
   } catch {
     /* jeton illisible : on repart sans */
   }
   sessionStorage.removeItem("import_token");
-  return { token: "", error };
+  return { token: "", error, fresh: false };
+}
+
+// L'autorisation Google ne dure qu'une heure. Pour reprendre, on retient ce qu'on importait,
+// on repasse par Google, et l'import repart de lui-même au retour.
+function reconnectAndResume(intent) {
+  sessionStorage.setItem("import_resume", JSON.stringify(intent));
+  connect();
+}
+
+function launch(intent) {
+  if (!plan || running) return;
+  if (!token) return reconnectAndResume(intent);
+  lastIntent = intent;
+  show("reprendre", false);
+  if (intent.kind === "folder") {
+    const folder = plan.mine.find((f) => f.id === intent.id);
+    if (folder) run(folder.ids);
+  } else {
+    run(plan.keep);
+  }
+}
+
+function resumeIfAsked(fresh) {
+  let intent = null;
+  try {
+    intent = JSON.parse(sessionStorage.getItem("import_resume") || "null");
+  } catch {
+    /* demande illisible : on ne reprend rien */
+  }
+  sessionStorage.removeItem("import_resume");
+  if (!fresh || !intent || !plan) return;
+  if (intent.kind === "folder" && plan.mine.some((f) => f.id === intent.id)) $("essai").value = intent.id;
+  launch(intent);
 }
 
 function askToReconnect(message) {
@@ -426,8 +462,10 @@ async function run(ids) {
   } else if (halt instanceof LoggedOut) {
     say("import-note", `${summary} Ta session sur la boîte a pris fin : rouvre la boîte pour te reconnecter, puis reviens sur cette page.`, true);
   } else if (halt instanceof Expired) {
-    say("import-note", `${summary} L'autorisation Google a duré son heure.`);
-    askToReconnect("L'autorisation Google dure une heure. Reconnecte-toi, puis relance : l'import reprendra où il en est.");
+    say("import-note", `${summary} L'import s'est arrêté parce que l'autorisation Google a expiré : elle ne dure qu'une heure. Touche le bouton ci-dessous, accepte de nouveau chez Google, et l'import reprendra tout seul où il en est.`, true);
+    askToReconnect("L'autorisation Google a expiré : elle ne dure qu'une heure. Reconnecte-toi pour continuer.");
+    show("reprendre");
+    $("reprendre").scrollIntoView({ block: "center" });
   } else if (paused) {
     say("import-note", `En pause. ${summary}`);
   } else {
@@ -518,7 +556,7 @@ async function undo() {
 
 // --------------------------------------------------------------- démarrage
 
-async function afterConnect() {
+async function afterConnect(fresh) {
   try {
     const profile = await gmail("/profile");
     source = "gmail:" + String(profile.emailAddress || "").toLowerCase();
@@ -528,7 +566,9 @@ async function afterConnect() {
     say("connexion-texte", `Connecté à ${profile.emailAddress}, en lecture seule.`);
     await refreshStatus();
     await analyse();
+    resumeIfAsked(fresh);
   } catch (err) {
+    sessionStorage.removeItem("import_resume");
     if (err instanceof Expired) return askToReconnect("L'autorisation Google a pris fin. Reconnecte-toi pour continuer.");
     if (err instanceof LoggedOut) return say("etat", "Ta session sur la boîte a pris fin : rouvre la boîte pour te reconnecter, puis reviens sur cette page.", true);
     say("analyse-note", err.message, true);
@@ -550,13 +590,13 @@ async function start() {
   $("client").value = clientId;
   await refreshStatus();
 
-  const { token: saved, error } = takeToken();
+  const { token: saved, error, fresh } = takeToken();
   if (!clientId) return show("reglage");
   show("connexion");
   if (error) say("connexion-texte", error, true);
-  if (!saved) return;
+  if (!saved) return sessionStorage.removeItem("import_resume");
   token = saved;
-  await afterConnect();
+  await afterConnect(fresh);
 }
 
 $("enregistrer").addEventListener("click", async () => {
@@ -573,11 +613,9 @@ $("changer").addEventListener("click", () => {
   $("client").focus();
 });
 $("connecter").addEventListener("click", connect);
-$("lancer-essai").addEventListener("click", () => {
-  const folder = plan && plan.mine.find((f) => f.id === $("essai").value);
-  if (folder) run(folder.ids);
-});
-$("lancer-tout").addEventListener("click", () => plan && run(plan.keep));
+$("lancer-essai").addEventListener("click", () => launch({ kind: "folder", id: $("essai").value }));
+$("lancer-tout").addEventListener("click", () => launch({ kind: "all" }));
+$("reprendre").addEventListener("click", () => reconnectAndResume(lastIntent));
 $("pause").addEventListener("click", () => {
   paused = true;
   $("pause").textContent = "Mise en pause…";

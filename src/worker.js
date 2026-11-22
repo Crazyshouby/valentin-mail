@@ -27,6 +27,20 @@ const MAX_LABELS = 200;
 const DAILY_WRITE_CAP = 60000;
 const IMPORT_MAX_BYTES = 40 * 1024 * 1024;
 const HEAD_BYTES = 128 * 1024;
+const PART_HEAD_BYTES = 16 * 1024;
+const MAX_PARTS = 60; // pièces jointes relevées par message
+// Relever les pièces jointes d'un message, c'est le parcourir en entier : quelques millièmes de seconde de
+// calcul pour un message ordinaire, bien plus pour un message de 25 Mo — or l'offre gratuite n'accorde que
+// 10 ms par requête, avec une tolérance pour les dépassements isolés. Les petits messages sont donc relevés
+// dès leur arrivée ; les lourds attendent une passe d'inventaire, où ils sont traités un par un.
+const INLINE_SCAN_BYTES = 2 * 1024 * 1024;
+const HEAVY_SCAN_BYTES = 4 * 1024 * 1024;
+const SCAN_ATTEMPTS = 3;
+// Ce qui reste à relever : jamais relu (0), ou relecture interrompue (2, 3…) tant qu'il reste des essais.
+const TO_SCAN = `scanned != 1 AND scanned <= ${SCAN_ATTEMPTS}`;
+const SESSION_SEEN_MS = 3600 * 1000; // la dernière activité d'un appareil est notée une fois par heure
+const SESSION_CACHE_MS = 60 * 1000;
+const ATTACHMENT_KINDS = ["image", "pdf", "doc", "media", "other"];
 
 export default {
   async email(message, env, ctx) {
@@ -40,8 +54,9 @@ export default {
       const response = await route(request, env);
       // Chaque consultation de la boîte fait avancer l'index de recherche de quelques messages,
       // une fois la réponse partie. La réception du courrier, elle, n'attend jamais ce travail.
-      if (response.status === 200 && new URL(request.url).pathname === "/api/messages") {
-        ctx.waitUntil(indexSome(env, 2).catch((err) => console.error("Indexation impossible :", err)));
+      const path = new URL(request.url).pathname;
+      if (response.status === 200 && (path === "/api/messages" || path === "/api/attachments")) {
+        ctx.waitUntil(upkeep(env).catch((err) => console.error("Entretien impossible :", err)));
       }
       return response;
     } catch (err) {
@@ -50,6 +65,13 @@ export default {
     }
   },
 };
+
+// Petit entretien de fond : le texte de quelques messages entre dans la recherche, puis leurs pièces
+// jointes dans l'inventaire.
+async function upkeep(env) {
+  await indexSome(env, 2);
+  await scanSome(env, 2);
+}
 
 // ---------------------------------------------------------------- réception
 
@@ -89,10 +111,20 @@ async function receive(message, env) {
   const id = crypto.randomUUID();
   const key = `raw/${id}.eml`;
   const raw = await new Response(message.raw).arrayBuffer();
+  const now = Date.now();
 
   await env.MAIL_BUCKET.put(key, raw, {
     httpMetadata: { contentType: "message/rfc822" },
   });
+
+  // La boîte d'où vient le message (une boîte Gmail qui transfère, sinon l'adresse visée) et ses pièces jointes.
+  const box = forwardedBox(headers.get("x-forwarded-for"), recipient) || recipient;
+  let parts = null;
+  try {
+    if (raw.byteLength <= INLINE_SCAN_BYTES) parts = scanParts(new Uint8Array(raw));
+  } catch (err) {
+    console.error("Pièces jointes non relevées :", err);
+  }
 
   // Une réponse rejoint la conversation du message auquel elle répond.
   let thread = null;
@@ -105,8 +137,8 @@ async function receive(message, env) {
   try {
     await env.DB.prepare(
       `INSERT INTO messages
-         (id, folder, direction, from_addr, from_name, to_addr, subject, message_id, date, size, is_read, r2_key, thread_id)
-       VALUES (?1, ?11, 'in', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?12, ?9, ?10)`
+         (id, folder, direction, from_addr, from_name, to_addr, subject, message_id, date, size, is_read, r2_key, thread_id, box, scanned)
+       VALUES (?1, ?11, 'in', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?12, ?9, ?10, ?13, ?14)`
     )
       .bind(
         id,
@@ -115,12 +147,14 @@ async function receive(message, env) {
         recipient.slice(0, 320),
         subject.slice(0, 500),
         (headers.get("message-id") || "").trim().slice(0, 500) || null,
-        Date.now(),
+        now,
         raw.byteLength,
         key,
         thread || id,
         folder,
-        read
+        read,
+        box.slice(0, 320),
+        parts ? 1 : 0
       )
       .run();
   } catch (err) {
@@ -128,6 +162,10 @@ async function receive(message, env) {
     // l'erreur remonter pour que l'expéditeur reçoive un avis d'échec.
     await env.MAIL_BUCKET.delete(key).catch(() => {});
     throw err;
+  }
+
+  if (parts && parts.length) {
+    await env.DB.batch(attachmentStatements(env, id, now, parts)).catch((err) => console.error("Pièces jointes non inscrites :", err));
   }
 
   if (rule && (rule.action === "label" || rule.action === "file") && rule.target) {
@@ -276,7 +314,9 @@ async function runIndex(request, env) {
   const body = (await readJson(request)) || {};
   const limit = Math.min(Math.max(Math.floor(Number(body.limit)) || 2, 1), 4);
   if (limit > 2 && (await spent(env)) >= DAILY_WRITE_CAP) return json({ error: QUOTA_REACHED, retry: nextReset() }, 429);
-  return json({ ok: true, remaining: await indexSome(env, limit) });
+  const unindexed = await indexSome(env, limit);
+  const unscanned = await scanSome(env, limit);
+  return json({ ok: true, remaining: unindexed + unscanned });
 }
 
 // ------------------------------------------------ budget d'écritures du jour
@@ -455,14 +495,17 @@ async function testPush(env) {
   }
 }
 
-async function saveDevice(request, env, remove) {
+async function saveDevice(request, env, remove, session) {
   const body = await readJson(request);
   const token = body && typeof body.token === "string" ? body.token.trim() : "";
   if (!/^[A-Za-z0-9_:.\-]{20,4096}$/.test(token)) return json({ error: "Identifiant d'appareil invalide." }, 400);
   if (remove) {
     await env.DB.prepare("DELETE FROM devices WHERE token = ?1").bind(token).run();
   } else {
-    await env.DB.prepare("INSERT OR REPLACE INTO devices (token, created) VALUES (?1, ?2)").bind(token, Date.now()).run();
+    // On retient par quelle session l'appareil s'est inscrit : la fermer à distance coupe aussi ses notifications.
+    await env.DB.prepare("INSERT OR REPLACE INTO devices (token, created, session) VALUES (?1, ?2, ?3)")
+      .bind(token, Date.now(), session ? session.id : null)
+      .run();
   }
   return json({ ok: true, push: Boolean(env.FCM_SERVICE_ACCOUNT) });
 }
@@ -621,9 +664,14 @@ async function route(request, env) {
   }
 
   if (path === "/api/login" && method === "POST") return login(request, env, fromApp);
-  if (path === "/api/logout" && method === "POST") return logout();
 
-  const authed = await isAuthenticated(request, env);
+  const session = await currentSession(request, env);
+  const authed = Boolean(session);
+
+  if (path === "/api/logout" && method === "POST") {
+    if (session) await revokeSessions(env, [session.id]).catch((err) => console.error("Session non fermée :", err));
+    return logout();
+  }
 
   if (path === "/api/me" && method === "GET") {
     if (!authed) return json({ authenticated: false });
@@ -653,7 +701,12 @@ async function route(request, env) {
   if (path === "/api/import/status" && method === "GET") return importStatus(env);
   if (path === "/api/import/check" && method === "POST") return importCheck(request, env);
   if (path === "/api/import/undo" && method === "POST") return importUndo(request, env);
-  if (path === "/api/devices" && (method === "PUT" || method === "DELETE")) return saveDevice(request, env, method === "DELETE");
+  if (path === "/api/devices" && (method === "PUT" || method === "DELETE")) return saveDevice(request, env, method === "DELETE", session);
+  if (path === "/api/sessions" && method === "GET") return listSessions(session, env);
+  if (path === "/api/sessions/others" && method === "DELETE") return revokeOthers(session, env);
+  if (path === "/api/boxes" && method === "GET") return listBoxes(env);
+  if (path === "/api/attachments" && method === "GET") return listAttachments(url, env);
+  if (path === "/api/attachments/scan" && method === "POST") return runScan(env);
   if (path === "/api/aliases" && method === "GET") return listAliases(env);
   if (path === "/api/rules" && method === "GET") return listRules(env);
 
@@ -674,6 +727,12 @@ async function route(request, env) {
     if (method === "PUT") return saveLabel(label[1], request, env);
     if (method === "DELETE") return deleteLabel(label[1], env);
   }
+
+  const other = path.match(/^\/api\/sessions\/([A-Za-z0-9_-]{20,64})$/);
+  if (other && method === "DELETE") return revokeSession(other[1], session, env);
+
+  const piece = path.match(/^\/api\/messages\/([0-9a-f-]{36})\/attachments\/(\d{1,4})$/);
+  if (piece && method === "GET") return readAttachment(piece[1], Number(piece[2]), env);
 
   const imported = path.match(/^\/api\/import\/messages\/([0-9a-f]{6,32})$/);
   if (imported && method === "PUT") return importMessage(imported[1], request, url, env);
@@ -737,9 +796,9 @@ async function login(request, env, fromApp = false) {
 
   // L'appli reçoit son jeton dans la réponse ; le navigateur, dans un cookie
   // que les scripts de la page ne peuvent pas lire.
-  if (fromApp) return json({ ok: true, token: await createSession(env, APP_SESSION_DAYS) });
+  if (fromApp) return json({ ok: true, token: await createSession(env, APP_SESSION_DAYS, request, "app") });
 
-  const token = await createSession(env, SESSION_DAYS);
+  const token = await createSession(env, SESSION_DAYS, request, "web");
   return json(
     { ok: true },
     200,
@@ -762,31 +821,151 @@ async function sessionKey(env) {
   return crypto.subtle.importKey("raw", digest, { name: "HMAC", hash: "SHA-256" }, false, ["sign", "verify"]);
 }
 
-async function createSession(env, days = SESSION_DAYS) {
-  const expires = String(Date.now() + days * 24 * 3600 * 1000);
-  const signature = await crypto.subtle.sign("HMAC", await sessionKey(env), new TextEncoder().encode(expires));
-  return `${expires}.${toBase64Url(new Uint8Array(signature))}`;
+// Chaque connexion crée une session : un jeton signé, propre à l'appareil, et une ligne qui permet de
+// la voir dans la liste des appareils et de la fermer à distance. Le jeton lui-même n'est gardé nulle
+// part : la ligne ne porte que son empreinte.
+async function createSession(env, days, request, kind) {
+  const now = Date.now();
+  const expires = now + days * 24 * 3600 * 1000;
+  const payload = `${expires}.${toBase64Url(crypto.getRandomValues(new Uint8Array(12)))}`;
+  const signature = await crypto.subtle.sign("HMAC", await sessionKey(env), new TextEncoder().encode(payload));
+  const token = `${payload}.${toBase64Url(new Uint8Array(signature))}`;
+  await env.DB.batch([
+    env.DB.prepare("INSERT INTO sessions (id, kind, name, place, created, seen, expires, revoked) VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, 0)").bind(
+      await sessionId(token),
+      kind,
+      deviceName(request, kind),
+      placeOf(request),
+      now,
+      expires
+    ),
+    env.DB.prepare("DELETE FROM sessions WHERE expires < ?1").bind(now),
+  ]);
+  return token;
 }
 
-async function isAuthenticated(request, env) {
+async function sessionId(token) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode("valentin-mail-appareil:" + token));
+  return toBase64Url(new Uint8Array(digest));
+}
+
+// Le nom sous lequel un appareil apparaît : l'appli donne son modèle, un navigateur se reconnaît à sa signature.
+function deviceName(request, kind) {
+  if (kind === "app") {
+    const given = (request.headers.get("X-Courrier-Device") || "").replace(/[^\x20-\x7e]/g, "").replace(/\s+/g, " ").trim();
+    return given.slice(0, 80) || "Appli Courrier";
+  }
+  const ua = request.headers.get("User-Agent") || "";
+  const browser = /Edg\//.test(ua) ? "Edge" : /OPR\//.test(ua) ? "Opera" : /Firefox\//.test(ua) ? "Firefox" : /Chrome\//.test(ua) ? "Chrome" : /Safari\//.test(ua) ? "Safari" : "Navigateur";
+  const system = /Android/.test(ua) ? "Android" : /iPhone|iPad/.test(ua) ? "iOS" : /Windows/.test(ua) ? "Windows" : /Mac OS X/.test(ua) ? "macOS" : /Linux/.test(ua) ? "Linux" : "";
+  return system ? `${browser} sur ${system}` : browser;
+}
+
+function placeOf(request) {
+  const cf = request.cf || {};
+  return [cf.city, cf.country].filter(Boolean).join(", ").slice(0, 80);
+}
+
+// État des sessions vues récemment par ce serveur, pour ne pas interroger la base à chaque requête.
+// Une session fermée ailleurs est donc refusée au plus tard une minute après.
+const sessionCache = new Map();
+
+// La session de celui qui demande ({ id, kind }), ou null s'il n'est pas connecté.
+async function currentSession(request, env) {
   const bearer = (request.headers.get("Authorization") || "").match(/^Bearer\s+(\S+)$/i);
   const token = bearer ? bearer[1] : readCookie(request, SESSION_COOKIE);
-  if (!token) return false;
-  const dot = token.indexOf(".");
-  if (dot < 1) return false;
-  const expires = token.slice(0, dot);
-  const signature = token.slice(dot + 1);
-  if (!/^\d{10,16}$/.test(expires) || Number(expires) < Date.now()) return false;
+  if (!token) return null;
+  // Deux formes de jeton : « échéance.aléa.signature », et l'ancienne « échéance.signature ».
+  const parts = token.split(".");
+  if (parts.length !== 2 && parts.length !== 3) return null;
+  const signature = parts.pop();
+  const expires = parts[0];
+  if (!/^\d{10,16}$/.test(expires) || Number(expires) < Date.now()) return null;
+  if (parts.length === 2 && !/^[A-Za-z0-9_-]{8,40}$/.test(parts[1])) return null;
   try {
-    return await crypto.subtle.verify(
-      "HMAC",
-      await sessionKey(env),
-      fromBase64Url(signature),
-      new TextEncoder().encode(expires)
-    );
+    const valid = await crypto.subtle.verify("HMAC", await sessionKey(env), fromBase64Url(signature), new TextEncoder().encode(parts.join(".")));
+    if (!valid) return null;
   } catch {
-    return false;
+    return null;
   }
+
+  const kind = bearer ? "app" : "web";
+  const id = await sessionId(token);
+  const now = Date.now();
+  const cached = sessionCache.get(id);
+  if (cached && now - cached.at < SESSION_CACHE_MS) return cached.revoked ? null : { id, kind };
+
+  let revoked = false;
+  try {
+    const row = await env.DB.prepare("SELECT revoked, seen FROM sessions WHERE id = ?1").bind(id).first();
+    if (row) {
+      revoked = Boolean(row.revoked);
+      if (!revoked && now - row.seen > SESSION_SEEN_MS) {
+        await env.DB.prepare("UPDATE sessions SET seen = ?1, place = ?2 WHERE id = ?3").bind(now, placeOf(request), id).run();
+      }
+    } else {
+      // Pas de ligne : un jeton d'aujourd'hui en a toujours une, donc celui-ci a été effacé. Un jeton
+      // d'avant la liste des appareils, lui, s'y inscrit à son premier passage — tant qu'on n'a pas
+      // demandé de déconnecter tous les autres appareils.
+      const legacy = parts.length === 1;
+      if (!legacy || (await readSettings(env)).legacy_sessions === "closed") return null;
+      await env.DB.prepare(
+        "INSERT OR IGNORE INTO sessions (id, kind, name, place, created, seen, expires, revoked) VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, 0)"
+      )
+        .bind(id, kind, deviceName(request, kind), placeOf(request), now, Number(expires))
+        .run();
+    }
+  } catch (err) {
+    // La liste des appareils est indisponible : la signature du jeton suffit, on ne ferme pas la boîte pour autant.
+    console.error("Liste des appareils illisible :", err);
+    return { id, kind };
+  }
+  if (sessionCache.size > 200) sessionCache.clear();
+  sessionCache.set(id, { revoked, at: now });
+  return revoked ? null : { id, kind };
+}
+
+async function revokeSessions(env, ids) {
+  for (let i = 0; i < ids.length; i += BATCH_SLICE) {
+    const part = ids.slice(i, i + BATCH_SLICE);
+    const marks = part.map(() => "?").join(",");
+    await env.DB.batch([
+      env.DB.prepare(`UPDATE sessions SET revoked = 1 WHERE id IN (${marks})`).bind(...part),
+      env.DB.prepare(`DELETE FROM devices WHERE session IN (${marks})`).bind(...part),
+    ]);
+    for (const id of part) sessionCache.set(id, { revoked: true, at: Date.now() });
+  }
+}
+
+async function listSessions(session, env) {
+  const now = Date.now();
+  const rows = await env.DB.prepare(
+    "SELECT id, kind, name, place, created, seen FROM sessions WHERE revoked = 0 AND expires > ?1 ORDER BY seen DESC LIMIT 50"
+  )
+    .bind(now)
+    .all();
+  const list = (rows.results || []).map((r) => (r.id === session.id ? { ...r, seen: now, current: true } : { ...r, current: false }));
+  list.sort((a, b) => Number(b.current) - Number(a.current));
+  return json({ sessions: list });
+}
+
+// Ferme une session à distance. Fermer la sienne revient à se déconnecter.
+async function revokeSession(id, session, env) {
+  const row = await env.DB.prepare("SELECT id FROM sessions WHERE id = ?1 AND revoked = 0").bind(id).first();
+  if (!row) return json({ error: "Cet appareil n'est plus connecté." }, 404);
+  await revokeSessions(env, [id]);
+  if (id === session.id) return json({ ok: true, current: true }, 200, { "Set-Cookie": sessionCookie("", 0) });
+  return json({ ok: true, current: false });
+}
+
+// Ferme toutes les sessions sauf celle qui le demande — y compris celles ouvertes avant la liste des
+// appareils et jamais revues depuis : elles ne pourront plus s'y inscrire.
+async function revokeOthers(session, env) {
+  const rows = await env.DB.prepare("SELECT id FROM sessions WHERE revoked = 0 AND id != ?1").bind(session.id).all();
+  const ids = (rows.results || []).map((r) => r.id);
+  await revokeSessions(env, ids);
+  await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('legacy_sessions', 'closed')").run();
+  return json({ ok: true, closed: ids.length });
 }
 
 // Un espace ou un retour à la ligne glissé au début ou à la fin (clavier de
@@ -822,7 +1001,7 @@ function readCookie(request, name) {
 // ----------------------------------------------------------------- messages
 
 const LIST_COLUMNS =
-  "id, folder, direction, from_addr, from_name, to_addr, subject, message_id, date, size, is_read, thread_id";
+  "id, folder, direction, from_addr, from_name, to_addr, subject, message_id, date, size, is_read, thread_id, box";
 
 // Dossiers personnels où le message est rangé (leurs identifiants).
 const LABEL_IDS = "(SELECT group_concat(label_id) FROM message_labels ml WHERE ml.message_id = messages.id) AS labels";
@@ -899,10 +1078,16 @@ async function listMessages(url, env) {
   const before = Number(url.searchParams.get("before")) || 0;
   const after = Number(url.searchParams.get("after")) || 0;
 
+  // Une boîte montre le courrier reçu à cette adresse (ou venu de ce compte Gmail), où qu'il soit rangé.
+  const box = (url.searchParams.get("box") || "").toLowerCase();
+  if (box && !ADDRESS.test(box)) return json({ error: "Boîte inconnue." }, 400);
+
   const where = label
     ? ["id IN (SELECT message_id FROM message_labels WHERE label_id = ?)", "folder != 'trash'"]
-    : ["folder = ?"];
-  const params = [label || folder];
+    : box
+      ? ["box = ?", "direction = 'in'", "folder != 'trash'"]
+      : ["folder = ?"];
+  const params = [label || box || folder];
   if (before > 0) {
     where.push("date < ?");
     params.push(before);
@@ -1020,6 +1205,7 @@ function forgetStatements(env, ids) {
   return [
     env.DB.prepare(`DELETE FROM messages_fts WHERE rowid IN (SELECT rowid FROM messages WHERE id IN (${marks}))`).bind(...ids),
     env.DB.prepare(`DELETE FROM message_labels WHERE message_id IN (${marks})`).bind(...ids),
+    env.DB.prepare(`DELETE FROM attachments WHERE message_id IN (${marks})`).bind(...ids),
   ];
 }
 
@@ -1179,6 +1365,341 @@ async function deleteLabel(id, env) {
   return json({ ok: true });
 }
 
+// ------------------------------------------------------------------ boîtes
+
+// La boîte Gmail d'où vient un message transféré automatiquement : Gmail l'écrit dans un en-tête,
+// « X-Forwarded-For: adresse-d'origine adresse-de-destination ».
+function forwardedBox(forwardedFor, recipient) {
+  const parts = String(forwardedFor || "").toLowerCase().split(/[\s,]+/).filter(Boolean);
+  for (let i = 0; i + 1 < parts.length; i++) {
+    if (parts[i + 1] === recipient && parts[i] !== recipient && ADDRESS.test(parts[i])) return parts[i];
+  }
+  return "";
+}
+
+// Les boîtes qui ont reçu du courrier : l'adresse principale, les autres adresses du domaine, et les
+// comptes extérieurs (Gmail) dont le courrier arrive ici par transfert ou par import.
+async function listBoxes(env) {
+  const rows = await env.DB.prepare(
+    `SELECT box AS address, COUNT(*) AS total, COALESCE(SUM(is_read = 0), 0) AS unread
+     FROM messages WHERE direction = 'in' AND folder != 'trash' AND box IS NOT NULL AND box != '' GROUP BY box`
+  ).all();
+  const main = mainAddress(env);
+  const domain = ownDomain(env);
+  const rank = { main: 0, alias: 1, outside: 2 };
+  const boxes = (rows.results || []).map((r) => ({
+    address: r.address,
+    kind: r.address === main ? "main" : r.address.endsWith("@" + domain) ? "alias" : "outside",
+    total: r.total,
+    unread: r.unread,
+  }));
+  boxes.sort((a, b) => rank[a.kind] - rank[b.kind] || a.address.localeCompare(b.address));
+  return json({ boxes });
+}
+
+// ------------------------------------------------- inventaire des pièces jointes
+
+// « valeur; clé=texte; clé*=utf-8''texte%20cod%C3%A9; clé*0=début; clé*1=suite »
+function parseParams(value) {
+  const pieces = [];
+  let current = "";
+  let quoted = false;
+  for (const ch of String(value || "")) {
+    if (ch === '"') quoted = !quoted;
+    if (ch === ";" && !quoted) {
+      pieces.push(current);
+      current = "";
+    } else {
+      current += ch;
+    }
+  }
+  pieces.push(current);
+  const base = pieces.shift().trim().toLowerCase();
+  const found = {};
+  for (const piece of pieces) {
+    const eq = piece.indexOf("=");
+    if (eq < 1) continue;
+    const key = piece.slice(0, eq).trim().toLowerCase().match(/^([^*]+)(?:\*(\d+))?(\*)?$/);
+    if (!key) continue;
+    let text = piece.slice(eq + 1).trim();
+    if (text.length >= 2 && text.startsWith('"') && text.endsWith('"')) text = text.slice(1, -1).replace(/\\(.)/g, "$1");
+    (found[key[1]] = found[key[1]] || []).push({ n: key[2] ? Number(key[2]) : 0, text, encoded: Boolean(key[3]), plain: !key[2] && !key[3] });
+  }
+  const params = {};
+  for (const [name, list] of Object.entries(found)) {
+    const extended = list.filter((x) => !x.plain).sort((a, b) => a.n - b.n);
+    if (!extended.length) {
+      params[name] = decodeMimeWords(list[0].text);
+      continue;
+    }
+    let charset = "utf-8";
+    const bytes = [];
+    extended.forEach((segment, index) => {
+      let text = segment.text;
+      if (segment.encoded && index === 0) {
+        const quote = text.split("'");
+        if (quote.length >= 3) {
+          charset = quote[0] || "utf-8";
+          text = quote.slice(2).join("'");
+        }
+      }
+      for (let i = 0; i < text.length; i++) {
+        if (segment.encoded && text[i] === "%" && /^[0-9a-f]{2}$/i.test(text.slice(i + 1, i + 3))) {
+          bytes.push(parseInt(text.slice(i + 1, i + 3), 16));
+          i += 2;
+        } else {
+          bytes.push(text.charCodeAt(i) & 255);
+        }
+      }
+    });
+    params[name] = decodeBytes(Uint8Array.from(bytes), charset);
+  }
+  return { base, params };
+}
+
+// La famille d'un fichier, pour les filtres de la galerie.
+function kindOf(mime, name) {
+  const ext = ((String(name).match(/\.([a-z0-9]{1,8})$/i) || [])[1] || "").toLowerCase();
+  if (mime.startsWith("image/") || ["jpg", "jpeg", "png", "gif", "webp", "heic", "heif", "bmp", "svg", "tif", "tiff", "avif"].includes(ext)) return "image";
+  if (mime === "application/pdf" || ext === "pdf") return "pdf";
+  if (mime.startsWith("audio/") || mime.startsWith("video/") || ["mp3", "m4a", "wav", "ogg", "flac", "aac", "mp4", "mov", "avi", "mkv", "webm"].includes(ext)) return "media";
+  if (/word|excel|powerpoint|spreadsheet|presentation|opendocument|officedocument|rtf/.test(mime) || mime.startsWith("text/")) return "doc";
+  if (["doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp", "rtf", "txt", "csv", "md", "pages", "numbers", "key", "ics", "html", "htm"].includes(ext)) return "doc";
+  return "other";
+}
+
+// Taille d'un contenu en base64 une fois décodé, d'après sa longueur écrite et celle de ses lignes.
+function base64Size(bytes, start, end) {
+  const length = end - start;
+  if (length <= 0) return 0;
+  const firstBreak = bytes.indexOf(10, start);
+  let chars = length;
+  if (firstBreak >= 0 && firstBreak < end) {
+    const line = firstBreak - start + 1;
+    const eol = firstBreak > start && bytes[firstBreak - 1] === 13 ? 2 : 1;
+    const fullLines = Math.floor(length / line);
+    chars = length - fullLines * eol;
+  }
+  let padding = 0;
+  for (let i = end - 1; i >= start && i > end - 6; i--) {
+    if (bytes[i] === 61) padding++;
+    else if (bytes[i] !== 10 && bytes[i] !== 13) break;
+  }
+  return Math.max(0, Math.floor((chars * 3) / 4) - padding);
+}
+
+// Une partie du message est-elle une pièce jointe ? Les mêmes règles que l'appli quand elle affiche un
+// message, à ceci près que le texte sans nom et les images incluses dans le texte n'en sont jamais.
+function describePart(bytes, head, type, start, end) {
+  const disposition = parseParams(head.get("content-disposition"));
+  const attached = disposition.base === "attachment";
+  const base = (type.base || "text/plain").slice(0, 100);
+  let name = cleanFileName(disposition.params.filename || type.params.name || "");
+  if (!attached && !name) {
+    if (base === "text/plain" || base === "text/html") return null;
+    if (/^(application\/(pgp-|pkcs7-|x-pkcs7-)|message\/delivery-status|message\/disposition-notification|text\/rfc822-headers)/.test(base)) return null;
+  }
+  if (!attached && head.get("content-id") && base.startsWith("image/")) return null;
+  if (!name) {
+    name = base === "message/rfc822" ? "message.eml" : base === "text/calendar" ? "invitation.ics" : base.startsWith("image/") ? `image.${base.slice(6).replace(/[^a-z0-9]/g, "") || "jpg"}` : "piece-jointe";
+  }
+  const encoding = (head.get("content-transfer-encoding") || "7bit").trim().toLowerCase().slice(0, 20);
+  const length = Math.max(0, end - start);
+  return {
+    name,
+    mime: base,
+    kind: kindOf(base, name),
+    size: encoding === "base64" ? base64Size(bytes, start, end) : length,
+    start,
+    length,
+    encoding,
+  };
+}
+
+// Relève les pièces jointes d'un message brut, avec l'endroit où chacune se trouve dans le fichier.
+// Le contenu des pièces n'est jamais décodé : on saute de limite en limite. Une pièce en base64 ne
+// contient aucun tiret, si bien que la suivante se trouve d'un seul bond, quelle que soit sa taille.
+function scanParts(bytes) {
+  const found = [];
+  const top = rawHead(bytes.subarray(0, Math.min(bytes.length, HEAD_BYTES)));
+  if (top.size < 0) return found;
+  const topType = parseParams(top.get("content-type") || "text/plain");
+  if (!topType.base.startsWith("multipart/")) {
+    const only = describePart(bytes, top, topType, top.size, bytes.length);
+    if (only) found.push(only);
+    return found;
+  }
+  const boundaries = [];
+  if (topType.params.boundary) boundaries.push(topType.params.boundary);
+  let open = null;
+  let pos = top.size;
+  while (pos < bytes.length && found.length < MAX_PARTS) {
+    const dash = bytes.indexOf(45, pos);
+    if (dash < 0) break;
+    if (bytes[dash + 1] !== 45 || (dash > 0 && bytes[dash - 1] !== 10)) {
+      pos = dash + 1;
+      continue;
+    }
+    // Une ligne qui commence par deux tirets : est-ce une limite connue ?
+    let eol = bytes.indexOf(10, dash);
+    if (eol < 0) eol = bytes.length;
+    const line = eol - dash > 300 ? "" : binaryString(bytes.subarray(dash + 2, eol)).replace(/\s+$/, "");
+    const closing = boundaries.some((b) => line === b + "--");
+    if (!closing && !boundaries.includes(line)) {
+      pos = dash + 2;
+      continue;
+    }
+    if (open) {
+      let end = dash - 1; // le saut de ligne qui précède la limite ne fait pas partie du contenu
+      if (end > open.start && bytes[end - 1] === 13) end--;
+      const part = describePart(bytes, open.head, open.type, open.start, Math.max(open.start, end));
+      if (part) found.push(part);
+      open = null;
+    }
+    pos = eol + 1;
+    if (closing) continue;
+    const head = rawHead(bytes.subarray(pos, Math.min(pos + PART_HEAD_BYTES, bytes.length)));
+    if (head.size < 0) break;
+    const type = parseParams(head.get("content-type") || "text/plain");
+    pos += head.size;
+    if (type.base.startsWith("multipart/")) {
+      if (type.params.boundary && boundaries.length < 20) boundaries.push(type.params.boundary);
+    } else {
+      open = { head, type, start: pos };
+    }
+  }
+  // Message coupé avant sa dernière limite : la partie en cours va jusqu'au bout.
+  if (open && found.length < MAX_PARTS) {
+    const part = describePart(bytes, open.head, open.type, open.start, bytes.length);
+    if (part) found.push(part);
+  }
+  return found;
+}
+
+function attachmentStatements(env, messageId, date, parts) {
+  return parts.map((p, n) =>
+    env.DB.prepare(
+      `INSERT OR REPLACE INTO attachments (message_id, part, name, mime, kind, size, start, length, encoding, upload, date)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)`
+    ).bind(messageId, n, p.name, p.mime, p.kind, p.size, p.start, p.length, p.encoding, p.upload || null, date)
+  );
+}
+
+// Inventaire des messages qui n'y sont pas encore — arrivés avant qu'il existe, ou trop lourds pour être
+// relevés à l'arrivée : pièces jointes, et boîte d'origine quand on ne la connaît pas. Chaque message est
+// relu en entier. Un message lourd, ou une reprise après interruption, se traite seul dans sa passe.
+// Renvoie le nombre de messages qui restent à relire.
+async function scanSome(env, limit) {
+  const rows = await env.DB.prepare(
+    `SELECT id, r2_key, size, date, direction, to_addr, box, scanned FROM messages WHERE ${TO_SCAN} ORDER BY scanned, date DESC LIMIT ?1`
+  )
+    .bind(limit)
+    .all();
+  let written = 0;
+  let done = 0;
+  for (const row of rows.results || []) {
+    const alone = row.size > HEAVY_SCAN_BYTES || row.scanned > 0;
+    if (done && alone) break;
+    done++;
+    // On note l'essai avant de commencer : si la relecture est interrompue (calcul trop long), le message
+    // sera repris plus tard, seul, et abandonné après quelques essais plutôt que de bloquer les suivants.
+    written += rowsWritten(await env.DB.prepare("UPDATE messages SET scanned = MAX(scanned, 1) + 1 WHERE id = ?1").bind(row.id).run());
+    try {
+      const object = await env.MAIL_BUCKET.get(row.r2_key);
+      const bytes = object ? new Uint8Array(await object.arrayBuffer()) : new Uint8Array(0);
+      const parts = scanParts(bytes);
+      let box = row.box;
+      if (!box && row.direction === "in") {
+        const head = rawHead(bytes.subarray(0, Math.min(bytes.length, HEAD_BYTES)));
+        box = forwardedBox(head.get("x-forwarded-for"), row.to_addr) || row.to_addr;
+      }
+      written += rowsWritten(
+        await env.DB.batch([
+          env.DB.prepare("DELETE FROM attachments WHERE message_id = ?1 AND upload IS NULL").bind(row.id),
+          ...attachmentStatements(env, row.id, row.date, parts),
+          env.DB.prepare("UPDATE messages SET scanned = 1, box = ?2 WHERE id = ?1").bind(row.id, box || null),
+        ])
+      );
+    } catch (err) {
+      // Un message illisible le restera : inutile d'y revenir.
+      console.error("Message non relu pour l'inventaire :", row.id, err);
+      await env.DB.prepare("UPDATE messages SET scanned = 9 WHERE id = ?1").bind(row.id).run().catch(() => {});
+    }
+    if (alone) break;
+  }
+  if (!done) return 0;
+  await spend(env, written);
+  const left = await env.DB.prepare(`SELECT COUNT(*) AS n FROM messages WHERE ${TO_SCAN}`).first();
+  return left ? left.n : 0;
+}
+
+// Fait avancer l'inventaire à la demande (la galerie de l'appli s'en sert tant qu'il reste à faire).
+async function runScan(env) {
+  if ((await spent(env)) >= DAILY_WRITE_CAP) return json({ error: QUOTA_REACHED, retry: nextReset() }, 429);
+  return json({ ok: true, remaining: await scanSome(env, 6) });
+}
+
+// La galerie : toutes les pièces jointes, des plus récentes aux plus anciennes, hors corbeille.
+async function listAttachments(url, env) {
+  const kind = url.searchParams.get("kind") || "";
+  if (kind && !ATTACHMENT_KINDS.includes(kind)) return json({ error: "Famille de fichiers inconnue." }, 400);
+  const q = (url.searchParams.get("q") || "").trim().slice(0, 100);
+  const where = ["m.folder != 'trash'"];
+  const params = [];
+  if (kind) {
+    where.push("a.kind = ?");
+    params.push(kind);
+  }
+  if (q) {
+    const like = "%" + q.replace(/[\\%_]/g, "\\$&") + "%";
+    where.push("(a.name LIKE ? ESCAPE '\\' OR m.subject LIKE ? ESCAPE '\\' OR m.from_name LIKE ? ESCAPE '\\' OR m.from_addr LIKE ? ESCAPE '\\')");
+    params.push(like, like, like, like);
+  }
+  // Suite de la liste : après la pièce « date.message.rang ».
+  const after = (url.searchParams.get("after") || "").match(/^(\d{1,16})\.([0-9a-f-]{36})\.(\d{1,4})$/);
+  if (after) {
+    where.push("(a.date < ? OR (a.date = ? AND (a.message_id > ? OR (a.message_id = ? AND a.part > ?))))");
+    params.push(Number(after[1]), Number(after[1]), after[2], after[2], Number(after[3]));
+  }
+  const [list, pending] = await env.DB.batch([
+    env.DB.prepare(
+      `SELECT a.message_id, a.part, a.name, a.mime, a.kind, a.size, a.date,
+              m.subject, m.from_name, m.from_addr, m.to_addr, m.direction
+       FROM attachments a JOIN messages m ON m.id = a.message_id
+       WHERE ${where.join(" AND ")}
+       ORDER BY a.date DESC, a.message_id, a.part LIMIT ${PAGE_SIZE + 1}`
+    ).bind(...params),
+    env.DB.prepare(`SELECT COUNT(*) AS n FROM messages WHERE ${TO_SCAN}`),
+  ]);
+  const rows = list.results || [];
+  const hasMore = rows.length > PAGE_SIZE;
+  return json({ attachments: hasMore ? rows.slice(0, PAGE_SIZE) : rows, hasMore, pending: pending.results[0].n });
+}
+
+// Une pièce jointe, telle qu'elle est écrite dans le message : le serveur n'en lit que cette tranche et
+// ne la décode pas. L'en-tête X-Part-Encoding dit à l'appli comment la décoder (base64, le plus souvent).
+async function readAttachment(id, part, env) {
+  const row = await env.DB.prepare(
+    `SELECT a.name, a.mime, a.start, a.length, a.encoding, a.upload, m.r2_key
+     FROM attachments a JOIN messages m ON m.id = a.message_id WHERE a.message_id = ?1 AND a.part = ?2`
+  )
+    .bind(id, part)
+    .first();
+  if (!row) return json({ error: "Pièce jointe introuvable." }, 404);
+  const headers = {
+    "Content-Type": "application/octet-stream",
+    "X-Part-Encoding": row.upload ? "identity" : row.encoding,
+    "X-Content-Type-Options": "nosniff",
+    "Cache-Control": "private, no-store",
+  };
+  if (!row.upload && !row.length) return new Response(new Uint8Array(0), { headers });
+  const object = row.upload
+    ? await env.MAIL_BUCKET.get(`uploads/${row.upload}`)
+    : await env.MAIL_BUCKET.get(row.r2_key, { range: { offset: row.start, length: row.length } });
+  if (!object) return json({ error: "Le fichier n'est plus sur le serveur." }, 404);
+  return new Response(object.body, { headers });
+}
+
 // ------------------------------------------------- import d'une autre boîte
 
 const IMPORT_SOURCE = /^gmail:[a-z0-9._+-]{1,64}@[a-z0-9.-]{1,255}$/;
@@ -1205,7 +1726,18 @@ function utf8ish(value) {
 // Les en-têtes d'un message brut (son début suffit).
 function rawHead(bytes) {
   const text = binaryString(bytes);
-  const end = text.search(/\r?\n\r?\n/);
+  // end : fin des en-têtes ; size : où commence ce qui les suit (-1 si la ligne vide n'est pas dans ce début).
+  let end = -1;
+  let size = -1;
+  const empty = /^\r?\n/.exec(text);
+  const blank = empty ? null : /\r?\n\r?\n/.exec(text);
+  if (empty) {
+    end = 0;
+    size = empty[0].length;
+  } else if (blank) {
+    end = blank.index;
+    size = blank.index + blank[0].length;
+  }
   const map = new Map();
   for (const line of (end < 0 ? text : text.slice(0, end)).replace(/\r?\n[ \t]+/g, " ").split(/\r?\n/)) {
     const colon = line.indexOf(":");
@@ -1213,13 +1745,13 @@ function rawHead(bytes) {
     const name = line.slice(0, colon).trim().toLowerCase();
     if (!map.has(name)) map.set(name, utf8ish(line.slice(colon + 1).trim()));
   }
-  return { get: (name) => map.get(name) || "" };
+  return { get: (name) => map.get(name) || "", size };
 }
 
 async function importStatus(env) {
   const [imported, unindexed] = await env.DB.batch([
     env.DB.prepare("SELECT COUNT(*) AS n FROM messages WHERE import_ref IS NOT NULL AND source IS NOT NULL"),
-    env.DB.prepare("SELECT COUNT(*) AS n FROM messages WHERE indexed = 0"),
+    env.DB.prepare(`SELECT COUNT(*) AS n FROM messages WHERE indexed = 0 OR (${TO_SCAN})`),
     env.DB.prepare("DELETE FROM cache WHERE key LIKE 'writes:%' AND expires < ?1").bind(Date.now()),
   ]);
   return json({
@@ -1327,14 +1859,20 @@ async function importMessage(ref, request, url, env) {
   const out = folder === "sent";
   const from = parseAddress(decodeMimeWords(head.get("from")));
   const account = source.slice(source.indexOf(":") + 1);
+  let parts = null;
+  try {
+    if (raw.byteLength <= INLINE_SCAN_BYTES) parts = scanParts(new Uint8Array(raw));
+  } catch (err) {
+    console.error("Pièces jointes non relevées :", err);
+  }
   const to = out ? parseRecipients(decodeMimeWords(head.get("to"))).list.join(", ") : account;
   let results;
   try {
     results = await env.DB.batch([
       env.DB.prepare(
         `INSERT INTO messages
-           (id, folder, direction, from_addr, from_name, to_addr, subject, message_id, date, size, is_read, r2_key, thread_id, indexed, source, import_ref)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 0, ?14, ?15)`
+           (id, folder, direction, from_addr, from_name, to_addr, subject, message_id, date, size, is_read, r2_key, thread_id, indexed, source, import_ref, box, scanned)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 0, ?14, ?15, ?16, ?17)`
       ).bind(
         id,
         folder,
@@ -1350,9 +1888,12 @@ async function importMessage(ref, request, url, env) {
         key,
         thread || id,
         source,
-        importRef
+        importRef,
+        account,
+        parts ? 1 : 0
       ),
       ...filing(id),
+      ...attachmentStatements(env, id, date, parts || []),
     ]);
   } catch (err) {
     await env.MAIL_BUCKET.delete(key).catch(() => {});
@@ -1655,8 +2196,8 @@ async function sendMessage(request, url, env) {
     await env.MAIL_BUCKET.put(key, bytes, { httpMetadata: { contentType: "message/rfc822" } });
     await env.DB.prepare(
       `INSERT INTO messages
-         (id, folder, direction, from_addr, from_name, to_addr, subject, message_id, date, size, is_read, r2_key, thread_id, indexed)
-       VALUES (?1, 'sent', 'out', ?2, ?3, ?4, ?5, NULL, ?6, ?7, 1, ?8, ?9, 1)`
+         (id, folder, direction, from_addr, from_name, to_addr, subject, message_id, date, size, is_read, r2_key, thread_id, indexed, box, scanned)
+       VALUES (?1, 'sent', 'out', ?2, ?3, ?4, ?5, NULL, ?6, ?7, 1, ?8, ?9, 1, ?2, 1)`
     )
       .bind(id, fromAddress, sender.name, to.list.join(", ").slice(0, 320), payload.subject, now, bytes.byteLength, key, thread || id)
       .run();
@@ -1669,6 +2210,9 @@ async function sendMessage(request, url, env) {
       await env.DB.prepare(`UPDATE uploads SET message_id = ? WHERE id IN (${files.map(() => "?").join(",")})`)
         .bind(id, ...files.map((f) => f.id))
         .run();
+      // Les fichiers joints entrent dans l'inventaire des pièces jointes, comme ceux des messages reçus.
+      const listed = files.map((f) => ({ name: f.name, mime: f.type, kind: kindOf(f.type, f.name), size: f.size, start: 0, length: f.size, encoding: "identity", upload: f.id }));
+      await env.DB.batch(attachmentStatements(env, id, now, listed)).catch((err) => console.error("Pièces jointes non inscrites :", err));
     }
   } catch (err) {
     stored = false;
