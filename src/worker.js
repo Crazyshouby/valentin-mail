@@ -702,7 +702,7 @@ async function route(request, env) {
   if (path === "/api/import/check" && method === "POST") return importCheck(request, env);
   if (path === "/api/import/undo" && method === "POST") return importUndo(request, env);
   if (path === "/api/devices" && (method === "PUT" || method === "DELETE")) return saveDevice(request, env, method === "DELETE", session);
-  if (path === "/api/sessions" && method === "GET") return listSessions(session, env);
+  if (path === "/api/sessions" && method === "GET") return listSessions(session, request, env);
   if (path === "/api/sessions/others" && method === "DELETE") return revokeOthers(session, env);
   if (path === "/api/boxes" && method === "GET") return listBoxes(env);
   if (path === "/api/attachments" && method === "GET") return listAttachments(url, env);
@@ -937,7 +937,7 @@ async function revokeSessions(env, ids) {
   }
 }
 
-async function listSessions(session, env) {
+async function listSessions(session, request, env) {
   const now = Date.now();
   const rows = await env.DB.prepare(
     "SELECT id, kind, name, place, created, seen FROM sessions WHERE revoked = 0 AND expires > ?1 ORDER BY seen DESC LIMIT 50"
@@ -945,6 +945,13 @@ async function listSessions(session, env) {
     .bind(now)
     .all();
   const list = (rows.results || []).map((r) => (r.id === session.id ? { ...r, seen: now, current: true } : { ...r, current: false }));
+  // Une appli inscrite avant de savoir dire son modèle apparaît sous un nom vague : elle le corrige ici.
+  const mine = list.find((r) => r.current);
+  const given = session.kind === "app" && request.headers.get("X-Courrier-Device") ? deviceName(request, "app") : "";
+  if (mine && given && mine.name !== given) {
+    mine.name = given;
+    await env.DB.prepare("UPDATE sessions SET name = ?1 WHERE id = ?2").bind(given, mine.id).run().catch(() => {});
+  }
   list.sort((a, b) => Number(b.current) - Number(a.current));
   return json({ sessions: list });
 }
