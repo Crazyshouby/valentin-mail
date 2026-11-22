@@ -62,4 +62,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           SIGNING_PASSPHRASE: ${{ secrets.SIGNING_PASSPHRASE }}
+          # Contenu de google-services.json : active les notifications instantanées dans l'APK publié.
+          GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
         run: bash android/ci/release.sh

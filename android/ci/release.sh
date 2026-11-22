@@ -41,7 +41,7 @@ export COURRIER_KEYSTORE="$KEYSTORE"
 gradle -p android assembleRelease
 rm -f "$KEYSTORE"
 
-VERSION="0.2.${COURRIER_BUILD:-1}"
+VERSION="0.3.${COURRIER_BUILD:-1}"
 APK="${RUNNER_TEMP:-/tmp}/courrier.apk"
 cp android/app/build/outputs/apk/release/app-release.apk "$APK"
 APKSIGNER="$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -n 1)"

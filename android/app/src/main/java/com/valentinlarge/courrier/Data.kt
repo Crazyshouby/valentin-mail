@@ -89,6 +89,16 @@ class Prefs(context: Context) {
         get() = sp.getBoolean("can_send", false)
         set(value) = sp.edit().putBoolean("can_send", value).apply()
 
+    /** Vrai si le serveur sait envoyer les notifications instantanées. */
+    var pushServer: Boolean
+        get() = sp.getBoolean("push_server", false)
+        set(value) = sp.edit().putBoolean("push_server", value).apply()
+
+    /** Le jeton sous lequel ce téléphone est déclaré au serveur. */
+    var pushToken: String?
+        get() = sp.getString("push_token", null)
+        set(value) = sp.edit().putString("push_token", value).apply()
+
     /** Les adresses depuis lesquelles on peut écrire, la principale en premier. */
     var addresses: List<String>
         get() = (sp.getString("addresses", "") ?: "").split('\n').filter { it.isNotBlank() }
@@ -104,7 +114,7 @@ class Prefs(context: Context) {
         set(value) = sp.edit().putBoolean("asked_notifications", value).apply()
 
     fun clearSession() {
-        sp.edit().remove("token").remove("from").remove("address").remove("can_send").remove("addresses").remove("last_seen").apply()
+        sp.edit().remove("token").remove("from").remove("address").remove("can_send").remove("push_server").remove("push_token").remove("addresses").remove("last_seen").apply()
     }
 }
 

@@ -148,8 +148,21 @@ class Api(private val prefs: Prefs) {
         prefs.from = me.optString("from")
         prefs.address = me.optString("address")
         prefs.canSend = me.optBoolean("canSend")
+        prefs.pushServer = me.optBoolean("push")
         val list = me.optJSONArray("addresses") ?: JSONArray()
         prefs.addresses = (0 until list.length()).map { list.optString(it) }.filter { it.isNotBlank() }
+    }
+
+    suspend fun registerDevice(token: String) = withContext(Dispatchers.IO) {
+        val body = JSONObject().put("token", token).toString().toRequestBody(jsonType)
+        json(request("/api/devices").put(body).build())
+        Unit
+    }
+
+    suspend fun forgetDevice(token: String) = withContext(Dispatchers.IO) {
+        val body = JSONObject().put("token", token).toString().toRequestBody(jsonType)
+        json(request("/api/devices").delete(body).build())
+        Unit
     }
 
     suspend fun aliases(): AliasPage = withContext(Dispatchers.IO) {

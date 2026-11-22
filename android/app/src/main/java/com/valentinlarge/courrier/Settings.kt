@@ -220,6 +220,16 @@ fun SettingsScreen(vm: MainViewModel, snackbar: SnackbarHostState) {
                     ) { Text("Ajouter la règle") }
                 }
             }
+
+            // ----------------------------------------------- notifications
+            SectionTitle(
+                "Notifications",
+                when {
+                    vm.pushApp && vm.pushServer -> "Instantanées : le serveur prévient ce téléphone dès qu'un message arrive."
+                    !vm.pushApp -> "Vérifiées toutes les 15 minutes environ. Cette version de l'appli n'a pas reçu les réglages Firebase."
+                    else -> "Vérifiées toutes les 15 minutes environ. Le serveur n'a pas encore la clé Firebase (secret FCM_SERVICE_ACCOUNT)."
+                },
+            )
             Spacer(Modifier.height(24.dp))
         }
     }

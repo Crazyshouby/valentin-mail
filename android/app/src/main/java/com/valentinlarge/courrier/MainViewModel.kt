@@ -97,11 +97,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     var addresses by mutableStateOf(repo.prefs.addresses)
         private set
 
+    /** Notifications instantanées : il faut que l'appli et le serveur soient tous deux réglés pour. */
+    val pushApp: Boolean = Push.available(application)
+    var pushServer by mutableStateOf(repo.prefs.pushServer)
+        private set
+
     private fun showAccount() {
         address = repo.prefs.address
         from = repo.prefs.from
         canSend = repo.prefs.canSend
         addresses = repo.prefs.addresses
+        pushServer = repo.prefs.pushServer
     }
 
     // ---- adresses et règles
@@ -236,6 +242,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun startMailbox() {
         Sync.schedule(app)
+        Push.register(app)
+        // Un signal arrivé pendant que la boîte est à l'écran la met à jour sans attendre.
+        Push.listener = { if (screen == Screen.Mailbox && folder == "inbox") refresh() }
         showLocal()
         refresh()
         viewModelScope.launch {
@@ -296,8 +305,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    override fun onCleared() {
+        Push.listener = null
+        super.onCleared()
+    }
+
     fun logout() {
         viewModelScope.launch {
+            Push.forget(app)
             repo.logout()
             Sync.cancel(app)
             messages = emptyList()

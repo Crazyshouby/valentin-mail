@@ -25,6 +25,15 @@
             </intent-filter>
         </activity>
 
+        <!-- Réveillé par Firebase quand le serveur signale un nouveau message. -->
+        <service
+            android:name=".PushService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
+
         <!-- Sert à confier une pièce jointe à une autre appli pour l'ouvrir. -->
         <provider
             android:name="androidx.core.content.FileProvider"

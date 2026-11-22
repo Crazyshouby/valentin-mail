@@ -8,6 +8,28 @@ plugins {
 val buildNumber = (System.getenv("COURRIER_BUILD") ?: "1").toInt()
 val releaseKeystore: String? = System.getenv("COURRIER_KEYSTORE")
 
+// Réglages Firebase (notifications instantanées), tirés du contenu de google-services.json que la
+// chaîne de construction fournit dans GOOGLE_SERVICES_JSON. Sans lui, l'appli se construit quand même
+// et relève simplement le courrier toutes les quinze minutes.
+val firebase: Map<String, String> = run {
+    val raw = System.getenv("GOOGLE_SERVICES_JSON")?.takeIf { it.isNotBlank() } ?: return@run emptyMap()
+    try {
+        val root = groovy.json.JsonSlurper().parseText(raw) as Map<*, *>
+        val project = root["project_info"] as Map<*, *>
+        val client = (root["client"] as List<*>).map { it as Map<*, *> }.firstOrNull {
+            ((it["client_info"] as Map<*, *>)["android_client_info"] as? Map<*, *>)?.get("package_name") == "com.valentinlarge.courrier"
+        } ?: error("aucune appli Android « com.valentinlarge.courrier » dans ce fichier")
+        mapOf(
+            "google_app_id" to (client["client_info"] as Map<*, *>)["mobilesdk_app_id"].toString(),
+            "gcm_defaultSenderId" to project["project_number"].toString(),
+            "project_id" to project["project_id"].toString(),
+            "google_api_key" to ((client["api_key"] as List<*>).first() as Map<*, *>)["current_key"].toString(),
+        )
+    } catch (e: Exception) {
+        throw GradleException("GOOGLE_SERVICES_JSON n'est pas un fichier google-services.json utilisable : ${e.message}")
+    }
+}
+
 android {
     namespace = "com.valentinlarge.courrier"
     compileSdk = 35
@@ -17,8 +39,9 @@ android {
         minSdk = 26
         targetSdk = 35
         versionCode = buildNumber
-        versionName = "0.2.$buildNumber"
+        versionName = "0.3.$buildNumber"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        firebase.forEach { (name, value) -> resValue("string", name, value) }
     }
 
     signingConfigs {
@@ -89,6 +112,10 @@ dependencies {
     implementation("androidx.work:work-runtime-ktx:2.9.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+
+    // Notifications instantanées : Firebase réveille l'appli quand le serveur signale un nouveau message.
+    implementation(platform("com.google.firebase:firebase-bom:33.7.0"))
+    implementation("com.google.firebase:firebase-messaging")
 
     // Lecture des messages bruts (MIME) sur l'appareil.
     implementation("com.sun.mail:android-mail:1.6.7")
