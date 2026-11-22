@@ -12,12 +12,14 @@ CREATE TABLE IF NOT EXISTS messages (
   size        INTEGER NOT NULL DEFAULT 0,
   is_read     INTEGER NOT NULL DEFAULT 0,
   r2_key      TEXT NOT NULL,
-  thread_id   TEXT                             -- conversation : identifiant de son premier message
+  thread_id   TEXT,                            -- conversation : identifiant de son premier message
+  indexed     INTEGER NOT NULL DEFAULT 0       -- 1 quand son texte est dans l'index de recherche
 );
 
 -- Base créée avant l'arrivée des conversations : ajouter la colonne à la main, une fois :
 --   ALTER TABLE messages ADD COLUMN thread_id TEXT;
 --   UPDATE messages SET thread_id = id WHERE thread_id IS NULL;
+--   ALTER TABLE messages ADD COLUMN indexed INTEGER NOT NULL DEFAULT 0;
 
 CREATE INDEX IF NOT EXISTS idx_messages_folder_date ON messages (folder, date DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_unread ON messages (folder, is_read);
@@ -82,4 +84,14 @@ CREATE TABLE IF NOT EXISTS cache (
   key     TEXT PRIMARY KEY,
   value   TEXT NOT NULL,
   expires INTEGER NOT NULL
+);
+
+-- Texte des messages, pour la recherche. Rempli peu à peu, à chaque consultation de la boîte.
+CREATE INDEX IF NOT EXISTS idx_messages_indexed ON messages (indexed, date DESC);
+CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(id UNINDEXED, body, tokenize = 'unicode61 remove_diacritics 2');
+
+-- Réglages partagés entre l'appli et le webmail (la signature, par exemple).
+CREATE TABLE IF NOT EXISTS settings (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
 );
