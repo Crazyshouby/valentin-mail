@@ -38,6 +38,7 @@ const HEAVY_SCAN_BYTES = 4 * 1024 * 1024;
 const SCAN_ATTEMPTS = 3;
 // Ce qui reste à relever : jamais relu (0), ou relecture interrompue (2, 3…) tant qu'il reste des essais.
 const TO_SCAN = `scanned != 1 AND scanned <= ${SCAN_ATTEMPTS}`;
+const PART_HEAD_MAX = 256 * 1024; // le plus long début de pièce jointe qu'on puisse demander
 const SESSION_SEEN_MS = 3600 * 1000; // la dernière activité d'un appareil est notée une fois par heure
 const SESSION_CACHE_MS = 60 * 1000;
 const ATTACHMENT_KINDS = ["image", "pdf", "doc", "media", "other"];
@@ -732,7 +733,7 @@ async function route(request, env) {
   if (other && method === "DELETE") return revokeSession(other[1], session, env);
 
   const piece = path.match(/^\/api\/messages\/([0-9a-f-]{36})\/attachments\/(\d{1,4})$/);
-  if (piece && method === "GET") return readAttachment(piece[1], Number(piece[2]), env);
+  if (piece && method === "GET") return readAttachment(piece[1], Number(piece[2]), url, env);
 
   const imported = path.match(/^\/api\/import\/messages\/([0-9a-f]{6,32})$/);
   if (imported && method === "PUT") return importMessage(imported[1], request, url, env);
@@ -1685,24 +1686,34 @@ async function listAttachments(url, env) {
 
 // Une pièce jointe, telle qu'elle est écrite dans le message : le serveur n'en lit que cette tranche et
 // ne la décode pas. L'en-tête X-Part-Encoding dit à l'appli comment la décoder (base64, le plus souvent).
-async function readAttachment(id, part, env) {
+//
+// « ?head=N » n'envoie que les N premiers octets écrits : une photo range une miniature d'elle-même au
+// début de son fichier, et l'appli s'en sert pour la galerie sans télécharger la photo entière.
+async function readAttachment(id, part, url, env) {
   const row = await env.DB.prepare(
-    `SELECT a.name, a.mime, a.start, a.length, a.encoding, a.upload, m.r2_key
+    `SELECT a.name, a.mime, a.size, a.start, a.length, a.encoding, a.upload, m.r2_key
      FROM attachments a JOIN messages m ON m.id = a.message_id WHERE a.message_id = ?1 AND a.part = ?2`
   )
     .bind(id, part)
     .first();
   if (!row) return json({ error: "Pièce jointe introuvable." }, 404);
+  const asked = url.searchParams.get("head");
+  const head = asked === null ? 0 : Number(asked);
+  if (asked !== null && !(Number.isInteger(head) && head >= 1 && head <= PART_HEAD_MAX)) {
+    return json({ error: "Début de pièce jointe mal demandé." }, 400);
+  }
   const headers = {
     "Content-Type": "application/octet-stream",
     "X-Part-Encoding": row.upload ? "identity" : row.encoding,
     "X-Content-Type-Options": "nosniff",
     "Cache-Control": "private, no-store",
   };
-  if (!row.upload && !row.length) return new Response(new Uint8Array(0), { headers });
+  const whole = row.upload ? row.size : row.length;
+  if (!whole) return new Response(new Uint8Array(0), { headers });
+  const length = head ? Math.min(head, whole) : whole;
   const object = row.upload
-    ? await env.MAIL_BUCKET.get(`uploads/${row.upload}`)
-    : await env.MAIL_BUCKET.get(row.r2_key, { range: { offset: row.start, length: row.length } });
+    ? await env.MAIL_BUCKET.get(`uploads/${row.upload}`, head ? { range: { offset: 0, length } } : undefined)
+    : await env.MAIL_BUCKET.get(row.r2_key, { range: { offset: row.start, length } });
   if (!object) return json({ error: "Le fichier n'est plus sur le serveur." }, 404);
   return new Response(object.body, { headers });
 }
