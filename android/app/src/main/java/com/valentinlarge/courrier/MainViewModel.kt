@@ -120,6 +120,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     var settingsBusy by mutableStateOf(false)
         private set
 
+    /** Vrai une fois ce téléphone déclaré au serveur pour les notifications instantanées. */
+    val pushRegistered: Boolean get() = repo.prefs.pushToken != null
+
+    var pushTesting by mutableStateOf(false)
+        private set
+
+    fun testPush() {
+        if (pushTesting) return
+        pushTesting = true
+        Push.register(app)
+        viewModelScope.launch {
+            try {
+                val (ok, detail) = repo.api.testPush()
+                notice = if (ok) "Signal envoyé. Une notification d'essai doit apparaître dans quelques secondes." else "Essai impossible : $detail"
+            } catch (e: Exception) {
+                notice = handle(e)
+            }
+            pushTesting = false
+        }
+    }
+
     fun openSettings() {
         screen = Screen.Settings
         settings { }

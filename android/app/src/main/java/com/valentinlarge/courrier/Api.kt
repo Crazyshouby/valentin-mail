@@ -153,6 +153,12 @@ class Api(private val prefs: Prefs) {
         prefs.addresses = (0 until list.length()).map { list.optString(it) }.filter { it.isNotBlank() }
     }
 
+    /** Demande au serveur un signal d'essai ; renvoie vrai et un nombre de téléphones, ou faux et la raison. */
+    suspend fun testPush(): Pair<Boolean, String> = withContext(Dispatchers.IO) {
+        val result = json(request("/api/push/test").post("{}".toRequestBody(jsonType)).build())
+        if (result.optBoolean("ok")) true to result.optInt("sent").toString() else false to result.optString("error")
+    }
+
     suspend fun registerDevice(token: String) = withContext(Dispatchers.IO) {
         val body = JSONObject().put("token", token).toString().toRequestBody(jsonType)
         json(request("/api/devices").put(body).build())

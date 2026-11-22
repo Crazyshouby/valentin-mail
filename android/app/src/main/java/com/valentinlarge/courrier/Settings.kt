@@ -230,6 +230,13 @@ fun SettingsScreen(vm: MainViewModel, snackbar: SnackbarHostState) {
                     else -> "Vérifiées toutes les 15 minutes environ. Le serveur n'a pas encore la clé Firebase (secret FCM_SERVICE_ACCOUNT)."
                 },
             )
+            if (vm.pushApp) {
+                OutlinedButton(
+                    onClick = { vm.testPush() },
+                    enabled = !vm.pushTesting,
+                    modifier = Modifier.padding(horizontal = 16.dp),
+                ) { Text(if (vm.pushTesting) "Essai en cours…" else "Tester les notifications") }
+            }
             Spacer(Modifier.height(24.dp))
         }
     }

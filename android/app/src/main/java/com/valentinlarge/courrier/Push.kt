@@ -75,6 +75,10 @@ class PushService : FirebaseMessagingService() {
     }
 
     override fun onMessageReceived(message: RemoteMessage) {
+        if (message.data["type"] == "test") {
+            Sync.announceTest(applicationContext)
+            return
+        }
         // Android laisse une vingtaine de secondes : le temps de relever le courrier et d'afficher la notification.
         runBlocking {
             try {

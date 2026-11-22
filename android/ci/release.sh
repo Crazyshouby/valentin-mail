@@ -46,6 +46,12 @@ APK="${RUNNER_TEMP:-/tmp}/courrier.apk"
 cp android/app/build/outputs/apk/release/app-release.apk "$APK"
 APKSIGNER="$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -n 1)"
 "$APKSIGNER" verify --verbose "$APK" | head -n 6
+AAPT="$(ls "$ANDROID_HOME"/build-tools/*/aapt2 | sort -V | tail -n 1)"
+if "$AAPT" dump resources "$APK" | grep -q "string/google_app_id"; then
+  echo "Réglages Firebase : présents dans l'APK (notifications instantanées)."
+else
+  echo "Réglages Firebase : absents de l'APK (relève toutes les quinze minutes)."
+fi
 
 cat > "${RUNNER_TEMP:-/tmp}/notes.md" <<NOTES
 Appli Android de la boîte mail, version $VERSION.

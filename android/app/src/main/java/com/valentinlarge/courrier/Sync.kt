@@ -80,6 +80,25 @@ object Sync {
         return fresh.size
     }
 
+    /** Notification d'essai : prouve que le signal du serveur arrive jusqu'à ce téléphone. */
+    fun announceTest(context: Context) {
+        if (Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) return
+        val manager = context.getSystemService(NotificationManager::class.java)
+        manager.createNotificationChannel(
+            NotificationChannel(CHANNEL, "Nouveaux messages", NotificationManager.IMPORTANCE_DEFAULT)
+        )
+        val notification = NotificationCompat.Builder(context, CHANNEL)
+            .setSmallIcon(R.drawable.ic_notification)
+            .setColor(0xFF1D57B8.toInt())
+            .setContentTitle("Notifications instantanées")
+            .setContentText("Le signal du serveur est bien arrivé sur ce téléphone.")
+            .setAutoCancel(true)
+            .build()
+        manager.notify(-1, notification)
+    }
+
     private fun notify(context: Context, item: MailItem) {
         if (Build.VERSION.SDK_INT >= 33 &&
             ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
