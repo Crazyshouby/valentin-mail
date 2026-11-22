@@ -19,6 +19,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -36,6 +38,10 @@ import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -53,6 +59,7 @@ fun ComposeScreen(vm: MainViewModel, snackbar: SnackbarHostState) {
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         if (uris.isNotEmpty()) vm.addFiles(uris)
     }
+    var confirmDiscard by remember { mutableStateOf(false) }
 
     Scaffold(
         containerColor = Color.White,
@@ -67,12 +74,15 @@ fun ComposeScreen(vm: MainViewModel, snackbar: SnackbarHostState) {
                         }
                     },
                     actions = {
+                        IconButton(onClick = { confirmDiscard = true }, enabled = !vm.sending) {
+                            Icon(Icons.Filled.Delete, contentDescription = "Supprimer le brouillon")
+                        }
                         Button(
                             onClick = { vm.send() },
                             enabled = !vm.sending && vm.canSend,
                             modifier = Modifier.padding(end = 8.dp).testTag("envoyer"),
                         ) {
-                            Text(if (vm.sending) "Envoi…" else "Envoyer")
+                            Text(if (vm.sending) "Patiente…" else "Envoyer")
                         }
                     },
                     colors = TopAppBarDefaults.topAppBarColors(containerColor = Paper),
@@ -152,6 +162,27 @@ fun ComposeScreen(vm: MainViewModel, snackbar: SnackbarHostState) {
             }
         }
     }
+
+    if (confirmDiscard) {
+        DiscardDialog(
+            onConfirm = {
+                confirmDiscard = false
+                vm.discardDraft()
+            },
+            onDismiss = { confirmDiscard = false },
+        )
+    }
+}
+
+@Composable
+private fun DiscardDialog(onConfirm: () -> Unit, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Supprimer ce brouillon ?") },
+        text = { Text("Ce que tu as écrit ici sera effacé. Pour le garder, ferme plutôt avec la croix : il ira dans les brouillons.") },
+        confirmButton = { TextButton(onClick = onConfirm) { Text("Supprimer", color = Red) } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Annuler") } },
+    )
 }
 
 @Composable

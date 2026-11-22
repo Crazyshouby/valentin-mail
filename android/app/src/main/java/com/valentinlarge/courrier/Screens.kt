@@ -5,7 +5,10 @@ import android.content.pm.PackageManager
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -33,6 +36,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Create
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.AlertDialog
@@ -53,17 +57,21 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.ScrollableTabRow
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SwipeToDismissBox
+import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -90,7 +98,15 @@ fun LoginScreen(vm: MainViewModel) {
     var visible by rememberSaveable { mutableStateOf(false) }
     var server by rememberSaveable { mutableStateOf(vm.prefs.server) }
     var editServer by rememberSaveable { mutableStateOf(false) }
-    val submit = { if (password.isNotEmpty() && !vm.loginBusy) vm.login(server, password) }
+    var lastTried by rememberSaveable { mutableStateOf("") }
+    // Renvoyer un mot de passe que le serveur vient de refuser ne ferait qu'user un essai.
+    val refused = vm.loginRefused && password == lastTried
+    val submit = {
+        if (password.isNotEmpty() && !vm.loginBusy && !refused) {
+            lastTried = password
+            vm.login(server, password)
+        }
+    }
 
     Box(
         Modifier
@@ -152,10 +168,17 @@ fun LoginScreen(vm: MainViewModel) {
                 }
 
                 vm.loginError?.let { Text(it, color = Red, fontWeight = FontWeight.Medium) }
+                if (refused) {
+                    Text(
+                        "Corrige le mot de passe avant de réessayer : au bout de huit refus, le serveur bloque un quart d'heure.",
+                        color = Muted,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
 
                 Button(
                     onClick = submit,
-                    enabled = password.isNotEmpty() && !vm.loginBusy,
+                    enabled = password.isNotEmpty() && !vm.loginBusy && !refused,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Text(if (vm.loginBusy) "Ouverture…" else "Ouvrir la boîte")
@@ -179,6 +202,9 @@ fun MailboxScreen(vm: MainViewModel, snackbar: SnackbarHostState) {
     var searching by rememberSaveable { mutableStateOf(false) }
     var menu by remember { mutableStateOf(false) }
     var confirmEmpty by remember { mutableStateOf(false) }
+    var confirmDelete by remember { mutableStateOf(false) }
+    val selecting = vm.selected.isNotEmpty()
+    val isDrafts = vm.folder == "drafts"
 
     AskForNotifications(vm)
 
@@ -187,55 +213,61 @@ fun MailboxScreen(vm: MainViewModel, snackbar: SnackbarHostState) {
         snackbarHost = { SnackbarHost(snackbar) },
         topBar = {
             Column(Modifier.background(Paper)) {
-                TopAppBar(
-                    title = {
-                        Column {
-                            Text("Courrier", style = MaterialTheme.typography.titleLarge)
-                            if (vm.address.isNotBlank()) {
-                                Text(
-                                    vm.address,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = Muted,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
+                if (selecting) {
+                    SelectionBar(vm, onDeleteForever = { confirmDelete = true })
+                } else {
+                    TopAppBar(
+                        title = {
+                            Column {
+                                Text("Courrier", style = MaterialTheme.typography.titleLarge)
+                                if (vm.address.isNotBlank()) {
+                                    Text(
+                                        vm.address,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = Muted,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
                             }
-                        }
-                    },
-                    actions = {
-                        IconButton(onClick = {
-                            searching = !searching
-                            if (!searching && vm.query.isNotEmpty()) vm.search("")
-                        }) {
-                            Icon(Icons.Filled.Search, contentDescription = "Chercher dans ce dossier")
-                        }
-                        Box {
-                            IconButton(onClick = { menu = true }) {
-                                Icon(Icons.Filled.MoreVert, contentDescription = "Autres actions")
+                        },
+                        actions = {
+                            if (!isDrafts) {
+                                IconButton(onClick = {
+                                    searching = !searching
+                                    if (!searching && vm.query.isNotEmpty()) vm.search("")
+                                }) {
+                                    Icon(Icons.Filled.Search, contentDescription = "Chercher dans ce dossier")
+                                }
                             }
-                            DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                                DropdownMenuItem(text = { Text("Actualiser") }, onClick = {
-                                    menu = false
-                                    vm.refresh()
-                                })
-                                if (vm.folder == "trash" && vm.messages.isNotEmpty()) {
-                                    DropdownMenuItem(text = { Text("Vider la corbeille", color = Red) }, onClick = {
+                            Box {
+                                IconButton(onClick = { menu = true }) {
+                                    Icon(Icons.Filled.MoreVert, contentDescription = "Autres actions")
+                                }
+                                DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                                    DropdownMenuItem(text = { Text("Actualiser") }, onClick = {
                                         menu = false
-                                        confirmEmpty = true
+                                        vm.refresh()
+                                    })
+                                    if (vm.folder == "trash" && vm.messages.isNotEmpty()) {
+                                        DropdownMenuItem(text = { Text("Vider la corbeille", color = Red) }, onClick = {
+                                            menu = false
+                                            confirmEmpty = true
+                                        })
+                                    }
+                                    DropdownMenuItem(text = { Text("Se déconnecter") }, onClick = {
+                                        menu = false
+                                        vm.logout()
                                     })
                                 }
-                                DropdownMenuItem(text = { Text("Se déconnecter") }, onClick = {
-                                    menu = false
-                                    vm.logout()
-                                })
                             }
-                        }
-                    },
-                    colors = TopAppBarDefaults.topAppBarColors(containerColor = Paper, scrolledContainerColor = Paper),
-                )
+                        },
+                        colors = TopAppBarDefaults.topAppBarColors(containerColor = Paper, scrolledContainerColor = Paper),
+                    )
+                }
                 AirmailStripe()
                 FolderTabs(vm)
-                if (searching) {
+                if (searching && !isDrafts && !selecting) {
                     OutlinedTextField(
                         value = vm.query,
                         onValueChange = { vm.search(it) },
@@ -255,13 +287,15 @@ fun MailboxScreen(vm: MainViewModel, snackbar: SnackbarHostState) {
             }
         },
         floatingActionButton = {
-            ExtendedFloatingActionButton(
-                onClick = { vm.compose() },
-                icon = { Icon(Icons.Filled.Create, contentDescription = null) },
-                text = { Text("Écrire") },
-                containerColor = Blue,
-                contentColor = Color.White,
-            )
+            if (!selecting) {
+                ExtendedFloatingActionButton(
+                    onClick = { vm.compose() },
+                    icon = { Icon(Icons.Filled.Create, contentDescription = null) },
+                    text = { Text("Écrire") },
+                    containerColor = Blue,
+                    contentColor = Color.White,
+                )
+            }
         },
     ) { padding ->
         PullToRefreshBox(
@@ -270,7 +304,7 @@ fun MailboxScreen(vm: MainViewModel, snackbar: SnackbarHostState) {
             modifier = Modifier.padding(padding).fillMaxSize(),
         ) {
             LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 96.dp)) {
-                if (vm.offline) {
+                if (vm.offline && !isDrafts) {
                     item(key = "hors-connexion") {
                         Text(
                             "Hors connexion : voici les messages enregistrés sur l'appareil.",
@@ -279,8 +313,10 @@ fun MailboxScreen(vm: MainViewModel, snackbar: SnackbarHostState) {
                         )
                     }
                 }
-                items(vm.messages, key = { it.id }) { item ->
-                    MessageRow(item, onClick = { vm.open(item.id) })
+                if (isDrafts) {
+                    items(vm.drafts, key = { it.id }) { draft -> DraftRow(draft, onClick = { vm.openDraft(draft) }) }
+                } else {
+                    items(vm.rows, key = { it.item.id }) { row -> SwipeRow(vm, row, selecting) }
                 }
                 item(key = "pied") { ListFoot(vm) }
             }
@@ -301,6 +337,75 @@ fun MailboxScreen(vm: MainViewModel, snackbar: SnackbarHostState) {
             dismissButton = { TextButton(onClick = { confirmEmpty = false }) { Text("Annuler") } },
         )
     }
+
+    if (confirmDelete) {
+        AlertDialog(
+            onDismissRequest = { confirmDelete = false },
+            title = { Text("Supprimer la sélection ?") },
+            text = { Text("Ces messages seront effacés définitivement, sans retour possible.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmDelete = false
+                    vm.deleteRows(vm.selectedRows())
+                }) { Text("Supprimer définitivement", color = Red) }
+            },
+            dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Annuler") } },
+        )
+    }
+}
+
+private fun counted(count: Int, one: String, many: String): String = if (count == 1) one else "$count $many"
+
+/** La barre du haut pendant une sélection : ce qu'on peut faire des lignes cochées. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SelectionBar(vm: MainViewModel, onDeleteForever: () -> Unit) {
+    var menu by remember { mutableStateOf(false) }
+    val count = vm.selected.size
+    TopAppBar(
+        title = { Text(if (count == 1) "1 sélectionné" else "$count sélectionnés", style = MaterialTheme.typography.titleLarge) },
+        navigationIcon = {
+            IconButton(onClick = { vm.clearSelection() }) {
+                Icon(Icons.Filled.Close, contentDescription = "Quitter la sélection")
+            }
+        },
+        actions = {
+            when (vm.folder) {
+                "inbox" -> TextButton(onClick = {
+                    vm.moveRows(vm.selectedRows(), "archive", counted(count, "Message archivé.", "messages archivés."))
+                }) { Text("Archiver") }
+                "trash" -> TextButton(onClick = { vm.restoreRows(vm.selectedRows()) }) { Text("Restaurer") }
+            }
+            IconButton(onClick = {
+                if (vm.folder == "trash") {
+                    onDeleteForever()
+                } else {
+                    vm.moveRows(vm.selectedRows(), "trash", counted(count, "Message mis à la corbeille.", "messages mis à la corbeille."))
+                }
+            }) {
+                Icon(
+                    Icons.Filled.Delete,
+                    contentDescription = if (vm.folder == "trash") "Supprimer définitivement" else "Mettre à la corbeille",
+                )
+            }
+            Box {
+                IconButton(onClick = { menu = true }) {
+                    Icon(Icons.Filled.MoreVert, contentDescription = "Autres actions")
+                }
+                DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                    DropdownMenuItem(text = { Text("Marquer lu") }, onClick = {
+                        menu = false
+                        vm.markRows(vm.selectedRows(), true)
+                    })
+                    DropdownMenuItem(text = { Text("Marquer non lu") }, onClick = {
+                        menu = false
+                        vm.markRows(vm.selectedRows(), false)
+                    })
+                }
+            }
+        },
+        colors = TopAppBarDefaults.topAppBarColors(containerColor = BlueWash),
+    )
 }
 
 @Composable
@@ -333,29 +438,126 @@ private fun FolderTabs(vm: MainViewModel) {
     }
 }
 
+/** Une ligne qu'on peut glisser : vers la droite pour archiver, vers la gauche pour la corbeille. */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun MessageRow(item: MailItem, onClick: () -> Unit) {
-    val unread = !item.isRead
+private fun SwipeRow(vm: MainViewModel, row: ThreadRow, selecting: Boolean) {
+    val folder = vm.folder
+    val toEnd: (() -> Unit)? = when (folder) {
+        "inbox" -> {
+            { vm.moveRows(listOf(row), "archive", counted(row.ids.size, "Message archivé.", "messages archivés.")) }
+        }
+        "trash" -> {
+            { vm.restoreRows(listOf(row)) }
+        }
+        else -> null
+    }
+    val toStart: (() -> Unit)? = if (folder == "trash") {
+        null
+    } else {
+        { vm.moveRows(listOf(row), "trash", counted(row.ids.size, "Message mis à la corbeille.", "messages mis à la corbeille.")) }
+    }
+    val onEnd by rememberUpdatedState(toEnd)
+    val onStart by rememberUpdatedState(toStart)
+
+    val state = rememberSwipeToDismissBoxState(
+        confirmValueChange = { value ->
+            when (value) {
+                SwipeToDismissBoxValue.StartToEnd -> {
+                    onEnd?.invoke()
+                    onEnd != null
+                }
+                SwipeToDismissBoxValue.EndToStart -> {
+                    onStart?.invoke()
+                    onStart != null
+                }
+                SwipeToDismissBoxValue.Settled -> true
+            }
+        },
+    )
+    // Une ligne revenue après « Annuler » doit réapparaître à sa place, pas glissée hors de l'écran.
+    LaunchedEffect(row.item.id) {
+        if (state.currentValue != SwipeToDismissBoxValue.Settled) state.snapTo(SwipeToDismissBoxValue.Settled)
+    }
+
+    SwipeToDismissBox(
+        state = state,
+        enableDismissFromStartToEnd = toEnd != null && !selecting,
+        enableDismissFromEndToStart = toStart != null && !selecting,
+        backgroundContent = {
+            val direction = state.dismissDirection
+            val archive = direction == SwipeToDismissBoxValue.StartToEnd
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .background(
+                        when (direction) {
+                            SwipeToDismissBoxValue.StartToEnd -> Blue
+                            SwipeToDismissBoxValue.EndToStart -> Red
+                            SwipeToDismissBoxValue.Settled -> Color.Transparent
+                        }
+                    )
+                    .padding(horizontal = 20.dp),
+                contentAlignment = if (archive) Alignment.CenterStart else Alignment.CenterEnd,
+            ) {
+                if (direction != SwipeToDismissBoxValue.Settled) {
+                    Text(
+                        if (!archive) "Corbeille" else if (folder == "trash") "Restaurer" else "Archiver",
+                        color = Color.White,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
+            }
+        },
+    ) {
+        MessageRow(
+            row,
+            selected = row.item.id in vm.selected,
+            onClick = { if (selecting) vm.toggleSelect(row) else vm.openRow(row) },
+            onLongClick = { vm.toggleSelect(row) },
+        )
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun MessageRow(row: ThreadRow, selected: Boolean, onClick: () -> Unit, onLongClick: () -> Unit) {
+    val item = row.item
+    val unread = row.unread
     val who = if (item.outgoing) "À : ${item.toAddr}" else item.fromName.ifBlank { item.fromAddr }.ifBlank { "Expéditeur inconnu" }
     Column {
         Row(
             Modifier
                 .fillMaxWidth()
-                .background(Color.White)
-                .clickable(onClick = onClick)
+                .background(if (selected) BlueWash else Color.White)
+                .combinedClickable(onClick = onClick, onLongClick = onLongClick)
                 .height(IntrinsicSize.Min)
         ) {
             // Non lu : filet bleu à gauche, expéditeur et objet en gras.
-            Box(Modifier.width(4.dp).fillMaxHeight().background(if (unread) Blue else Color.Transparent))
+            Box(Modifier.width(4.dp).fillMaxHeight().background(if (unread || selected) Blue else Color.Transparent))
             Column(Modifier.weight(1f).padding(start = 14.dp, end = 16.dp, top = 11.dp, bottom = 12.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        who,
-                        modifier = Modifier.weight(1f),
-                        fontWeight = if (unread) FontWeight.Bold else FontWeight.Medium,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
+                    Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            who,
+                            modifier = Modifier.weight(1f, fill = false),
+                            fontWeight = if (unread) FontWeight.Bold else FontWeight.Medium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        if (row.count > 1) {
+                            // Plusieurs messages dans la conversation : leur nombre, à côté du nom.
+                            Text(
+                                row.count.toString(),
+                                modifier = Modifier
+                                    .padding(start = 8.dp)
+                                    .border(1.dp, Line, RoundedCornerShape(6.dp))
+                                    .padding(horizontal = 6.dp),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Muted,
+                            )
+                        }
+                    }
                     Spacer(Modifier.width(10.dp))
                     Text(shortDate(item.date), style = MaterialTheme.typography.bodySmall, color = Muted)
                 }
@@ -374,7 +576,45 @@ private fun MessageRow(item: MailItem, onClick: () -> Unit) {
 }
 
 @Composable
+private fun DraftRow(draft: Draft, onClick: () -> Unit) {
+    val preview = draft.text.lineSequence().map { it.trim() }.firstOrNull { it.isNotBlank() && !it.startsWith(">") }.orEmpty()
+    Column {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .background(Color.White)
+                .clickable(onClick = onClick)
+                .padding(start = 18.dp, end = 16.dp, top = 11.dp, bottom = 12.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    if (draft.to.isBlank()) "Sans destinataire" else "À : ${draft.to}",
+                    modifier = Modifier.weight(1f),
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Spacer(Modifier.width(10.dp))
+                Text(shortDate(draft.updated), style = MaterialTheme.typography.bodySmall, color = Muted)
+            }
+            Text(
+                draft.subject.ifBlank { "(sans objet)" },
+                style = MaterialTheme.typography.bodyMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (preview.isNotBlank()) {
+                Text(preview, style = MaterialTheme.typography.bodySmall, color = Muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+        }
+        HorizontalDivider(color = Line)
+    }
+}
+
+@Composable
 private fun ListFoot(vm: MainViewModel) {
+    val isDrafts = vm.folder == "drafts"
+    val empty = if (isDrafts) vm.drafts.isEmpty() else vm.messages.isEmpty()
     Column(
         Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -386,13 +626,13 @@ private fun ListFoot(vm: MainViewModel) {
                 Text(error, color = Red, textAlign = TextAlign.Center)
                 OutlinedButton(onClick = { vm.refresh() }) { Text("Réessayer") }
             }
-            vm.messages.isEmpty() && vm.loading -> Text("Chargement des messages…", color = Muted)
-            vm.messages.isEmpty() -> Text(
-                if (vm.query.isNotBlank()) "Aucun message ne correspond à « ${vm.query} » dans ce dossier." else folderOf(vm.folder).empty,
+            empty && vm.loading -> Text("Chargement…", color = Muted)
+            empty -> Text(
+                if (vm.query.isNotBlank() && !isDrafts) "Aucun message ne correspond à « ${vm.query} » dans ce dossier." else folderOf(vm.folder).empty,
                 color = Muted,
                 textAlign = TextAlign.Center,
             )
-            vm.hasMore -> OutlinedButton(onClick = { vm.loadMore() }, enabled = !vm.loadingMore) {
+            vm.hasMore && !isDrafts -> OutlinedButton(onClick = { vm.loadMore() }, enabled = !vm.loadingMore) {
                 Text(if (vm.loadingMore) "Chargement…" else "Afficher les messages plus anciens")
             }
         }

@@ -34,6 +34,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
@@ -123,6 +125,18 @@ fun ReaderScreen(vm: MainViewModel, snackbar: SnackbarHostState) {
                                     Icon(Icons.Filled.MoreVert, contentDescription = "Autres actions")
                                 }
                                 DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                                    if (item.folder != "trash") {
+                                        if (vm.canReplyAll) {
+                                            DropdownMenuItem(text = { Text("Répondre à tous") }, onClick = {
+                                                menu = false
+                                                vm.reply(all = true)
+                                            })
+                                        }
+                                        DropdownMenuItem(text = { Text("Transférer") }, onClick = {
+                                            menu = false
+                                            vm.forward()
+                                        })
+                                    }
                                     if (item.folder == "inbox") {
                                         DropdownMenuItem(text = { Text("Archiver") }, onClick = {
                                             menu = false
@@ -159,6 +173,7 @@ fun ReaderScreen(vm: MainViewModel, snackbar: SnackbarHostState) {
                     colors = TopAppBarDefaults.topAppBarColors(containerColor = Paper),
                 )
                 AirmailStripe()
+                ThreadStrip(vm, id)
             }
         },
     ) { padding ->
@@ -272,6 +287,50 @@ private fun ColumnScope.Message(
 
     HorizontalDivider(color = Line)
     MailBody(page, remote, onLink = onLink, modifier = Modifier.fillMaxWidth().weight(1f).testTag("corps"))
+}
+
+/** Dans une conversation : où l'on en est, et de quoi passer d'un message à l'autre. */
+@Composable
+private fun ThreadStrip(vm: MainViewModel, current: String) {
+    val thread = vm.thread
+    val index = thread.indexOfFirst { it.id == current }
+    if (thread.size < 2 || index < 0) return
+    var list by remember { mutableStateOf(false) }
+
+    Row(Modifier.fillMaxWidth().background(BlueWash).padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+        IconButton(onClick = { vm.openSibling(-1) }, enabled = index > 0) {
+            Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, contentDescription = "Message précédent de la conversation")
+        }
+        Box(Modifier.weight(1f)) {
+            Text(
+                "Message ${index + 1} sur ${thread.size} de la conversation",
+                modifier = Modifier.fillMaxWidth().clickable { list = true }.padding(vertical = 10.dp),
+                textAlign = TextAlign.Center,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold,
+            )
+            DropdownMenu(expanded = list, onDismissRequest = { list = false }) {
+                thread.forEach { item ->
+                    val who = if (item.outgoing) "Moi" else item.fromName.ifBlank { item.fromAddr }
+                    DropdownMenuItem(
+                        text = {
+                            Text(
+                                "$who, ${shortDate(item.date)}",
+                                fontWeight = if (item.id == current) FontWeight.Bold else FontWeight.Normal,
+                            )
+                        },
+                        onClick = {
+                            list = false
+                            if (item.id != current) vm.open(item.id)
+                        },
+                    )
+                }
+            }
+        }
+        IconButton(onClick = { vm.openSibling(1) }, enabled = index < thread.lastIndex) {
+            Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = "Message suivant de la conversation")
+        }
+    }
 }
 
 @Composable

@@ -118,6 +118,8 @@ class Api(private val prefs: Prefs) {
         date = optLong("date"),
         size = optLong("size"),
         isRead = optInt("is_read") != 0,
+        threadId = optString("thread_id").ifBlank { getString("id") },
+        threadCount = maxOf(1, optInt("thread_count", 1)),
     )
 
     private fun JSONArray?.toFiles(): List<RemoteFile> {
@@ -167,6 +169,67 @@ class Api(private val prefs: Prefs) {
     suspend fun detail(id: String): Pair<MailItem, List<RemoteFile>> = withContext(Dispatchers.IO) {
         val result = json(request("/api/messages/$id").get().build())
         result.getJSONObject("message").toItem() to result.optJSONArray("attachments").toFiles()
+    }
+
+    /** Tous les messages d'une conversation, du plus ancien au plus récent. */
+    suspend fun thread(id: String): List<MailItem> = withContext(Dispatchers.IO) {
+        val array = json(request("/api/threads/$id").get().build()).optJSONArray("messages") ?: JSONArray()
+        val items = (0 until array.length()).map { array.getJSONObject(it).toItem() }
+        items.map { it.copy(threadCount = maxOf(1, items.size)) }
+    }
+
+    /** Une même action sur plusieurs messages : lu ou non lu, changement de dossier, suppression. */
+    suspend fun batch(ids: List<String>, isRead: Boolean? = null, folder: String? = null, delete: Boolean = false) =
+        withContext(Dispatchers.IO) {
+            for (part in ids.distinct().chunked(100)) {
+                val body = JSONObject().put("ids", JSONArray(part))
+                if (isRead != null) body.put("is_read", isRead)
+                if (folder != null) body.put("folder", folder)
+                if (delete) body.put("delete", true)
+                json(request("/api/messages/batch").post(body.toString().toRequestBody(jsonType)).build())
+            }
+        }
+
+    suspend fun drafts(): List<Draft> = withContext(Dispatchers.IO) {
+        val array = json(request("/api/drafts").get().build()).optJSONArray("drafts") ?: JSONArray()
+        (0 until array.length()).map { i ->
+            val o = array.getJSONObject(i)
+            Draft(
+                id = o.getString("id"),
+                to = o.optString("to"),
+                cc = o.optString("cc"),
+                subject = o.optString("subject"),
+                text = o.optString("text"),
+                replyToId = if (o.isNull("reply_to_id")) null else o.optString("reply_to_id").ifBlank { null },
+                updated = o.optLong("updated"),
+                files = o.optJSONArray("attachments").toFiles(),
+            )
+        }
+    }
+
+    suspend fun saveDraft(
+        id: String,
+        to: String,
+        cc: String,
+        subject: String,
+        text: String,
+        replyToId: String?,
+        attachmentIds: List<String>,
+    ) = withContext(Dispatchers.IO) {
+        val body = JSONObject()
+            .put("to", to)
+            .put("cc", cc)
+            .put("subject", subject)
+            .put("text", text)
+            .put("attachment_ids", JSONArray(attachmentIds))
+        if (replyToId != null) body.put("reply_to_id", replyToId)
+        json(request("/api/drafts/$id").put(body.toString().toRequestBody(jsonType)).build())
+        Unit
+    }
+
+    suspend fun deleteDraft(id: String) = withContext(Dispatchers.IO) {
+        json(request("/api/drafts/$id").delete().build())
+        Unit
     }
 
     suspend fun downloadRaw(id: String, target: File) = withContext(Dispatchers.IO) {
@@ -220,6 +283,7 @@ class Api(private val prefs: Prefs) {
         text: String,
         replyToId: String?,
         attachmentIds: List<String>,
+        draftId: String? = null,
     ): Boolean = withContext(Dispatchers.IO) {
         val body = JSONObject()
             .put("to", to)
@@ -228,6 +292,7 @@ class Api(private val prefs: Prefs) {
             .put("text", text)
         if (replyToId != null) body.put("reply_to_id", replyToId)
         if (attachmentIds.isNotEmpty()) body.put("attachment_ids", JSONArray(attachmentIds))
+        if (draftId != null) body.put("draft_id", draftId)
         json(request("/api/send").post(body.toString().toRequestBody(jsonType)).build()).optBoolean("stored", true)
     }
 }

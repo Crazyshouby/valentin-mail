@@ -76,6 +76,14 @@ if grep -q "^OK (" "$OUT/instrument.log" && ! grep -q "FAILURES" "$OUT/instrumen
     if (!file || file.status !== 200 || file.bytes !== 1480) throw new Error("pièce jointe non récupérée : " + JSON.stringify(sent.fetched));
     if (!String(sent.body.to).includes("eloise@example.org")) throw new Error("mauvais destinataire : " + sent.body.to);
     console.log("Envoi vérifié :", sent.body.subject, "→", sent.body.to, "avec", file.filename, file.bytes, "octets");
+    const forwarded = lines.find((l) => /^Fwd: Votre commande/.test(l.body.subject || ""));
+    const joined = forwarded && (forwarded.fetched || [])[0];
+    if (!joined || joined.filename !== "facture.txt" || joined.status !== 200 || joined.bytes !== 23) {
+      throw new Error("transfert sans sa pièce jointe : " + JSON.stringify(forwarded && forwarded.fetched));
+    }
+    const draft = lines.find((l) => l.body.subject === "Idée à creuser");
+    if (!draft || !String(draft.body.to).includes("plus-tard@example.com")) throw new Error("le brouillon repris n'est pas parti");
+    console.log("Transfert et brouillon vérifiés.");
   ' "$OUT/resend.log" && status=0
 else
   echo "Le parcours dans l'appli a échoué."

@@ -3,6 +3,7 @@ package com.valentinlarge.courrier
 import android.app.Application
 import android.net.Uri
 import android.provider.OpenableColumns
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -37,6 +38,22 @@ data class DraftFile(
     val uploadId: String? = null,
 )
 
+/** Une ligne de la liste : le dernier message d'une conversation, et ceux du dossier qu'elle regroupe. */
+data class ThreadRow(val item: MailItem, val ids: List<String>, val count: Int, val unread: Boolean)
+
+private fun groupByThread(items: List<MailItem>): List<ThreadRow> {
+    val threads = LinkedHashMap<String, MutableList<MailItem>>()
+    for (item in items) threads.getOrPut(item.threadId) { ArrayList() }.add(item)
+    return threads.values.map { group ->
+        ThreadRow(
+            item = group.first(),
+            ids = group.map { it.id },
+            count = maxOf(group.size, group.maxOf { it.threadCount }),
+            unread = group.any { !it.isRead },
+        )
+    }
+}
+
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val app = application
@@ -48,6 +65,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     /** Message bref affiché en bas de l'écran. */
     var notice by mutableStateOf<String?>(null)
+
+    /** Le message bref qui propose « Annuler », s'il y en a un. */
+    var undoFor by mutableStateOf<String?>(null)
+        private set
+    private var undoAction: (() -> Unit)? = null
+
+    private fun say(text: String, undo: (() -> Unit)? = null) {
+        undoAction = undo
+        undoFor = if (undo != null) text else null
+        notice = text
+    }
+
+    fun undoLast() {
+        val action = undoAction
+        undoAction = null
+        undoFor = null
+        action?.invoke()
+    }
 
     // ---- compte (tel que le serveur le décrit)
     var address by mutableStateOf(repo.prefs.address)
@@ -69,6 +104,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     var loginError by mutableStateOf<String?>(null)
         private set
 
+    /** Vrai quand le serveur vient de refuser le mot de passe : le renvoyer tel quel userait un essai pour rien. */
+    var loginRefused by mutableStateOf(false)
+        private set
+
     // ---- liste
     var folder by mutableStateOf("inbox")
         private set
@@ -88,6 +127,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         private set
     var listError by mutableStateOf<String?>(null)
         private set
+
+    /** La liste telle qu'elle s'affiche : une ligne par conversation. */
+    val rows: List<ThreadRow> by derivedStateOf { groupByThread(messages) }
+
+    /** Lignes cochées (repérées par leur message le plus récent). */
+    val selected = mutableStateListOf<String>()
+
+    var drafts by mutableStateOf<List<Draft>>(emptyList())
+        private set
     private var listJob: Job? = null
     private var searchJob: Job? = null
 
@@ -95,6 +143,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     var opened by mutableStateOf<OpenedMail?>(null)
         private set
     var readerError by mutableStateOf<String?>(null)
+        private set
+
+    /** Les messages de la conversation ouverte, du plus ancien au plus récent (vide s'il n'y en a qu'un). */
+    var thread by mutableStateOf<List<MailItem>>(emptyList())
         private set
     private var readerJob: Job? = null
     private var returnFolder: String? = null
@@ -107,6 +159,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val draftFiles = mutableStateListOf<DraftFile>()
     var draftReplyTo by mutableStateOf<String?>(null)
         private set
+
+    /** Identifiant du brouillon sur le serveur, s'il y a déjà été enregistré. */
+    var draftId by mutableStateOf<String?>(null)
+        private set
+    private var baseline = ""
     var sending by mutableStateOf(false)
         private set
     var sendError by mutableStateOf<String?>(null)
@@ -158,6 +215,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (loginBusy) return
         loginBusy = true
         loginError = null
+        loginRefused = false
         viewModelScope.launch {
             try {
                 if (server.isNotBlank()) repo.prefs.server = server
@@ -168,6 +226,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 screen = Screen.Mailbox
                 startMailbox()
             } catch (e: Exception) {
+                loginRefused = e is ApiException && e.status == 401
                 loginError = when {
                     e is ApiException || e is OfflineException -> e.message
                     else -> "Connexion impossible : ${e.message ?: e.javaClass.simpleName}"
@@ -205,8 +264,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         hasMore = false
         listError = null
         messages = emptyList()
+        selected.clear()
         showLocal()
         refresh()
+    }
+
+    private fun loadDrafts() {
+        listJob?.cancel()
+        listJob = viewModelScope.launch {
+            loading = true
+            listError = null
+            try {
+                drafts = repo.api.drafts()
+            } catch (e: OfflineException) {
+                listError = "Les brouillons sont gardés sur le serveur : reconnecte-toi à internet pour les voir."
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                listError = handle(e)
+            }
+            loading = false
+        }
     }
 
     fun search(text: String) {
@@ -220,6 +298,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun refresh() {
+        if (folder == "drafts") {
+            loadDrafts()
+            return
+        }
         listJob?.cancel()
         val target = folder
         val text = query
@@ -283,17 +365,142 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    // ------------------------------------------- sélection et actions groupées
+
+    fun toggleSelect(row: ThreadRow) {
+        if (!selected.remove(row.item.id)) selected.add(row.item.id)
+    }
+
+    fun clearSelection() = selected.clear()
+
+    fun selectedRows(): List<ThreadRow> = rows.filter { it.item.id in selected }
+
+    /** Déplace des conversations entières ; la liste se met à jour tout de suite, et le geste peut être annulé. */
+    fun moveRows(target: List<ThreadRow>, to: String, done: String) {
+        val ids = target.flatMap { it.ids }
+        if (ids.isEmpty()) return
+        val origin = folder
+        selected.clear()
+        messages = messages.filter { it.id !in ids }
+        viewModelScope.launch {
+            try {
+                repo.moveAll(ids, to)
+                say(done) {
+                    viewModelScope.launch {
+                        try {
+                            repo.moveAll(ids, origin)
+                        } catch (e: Exception) {
+                            notice = handle(e)
+                        }
+                        showLocal()
+                        refresh()
+                    }
+                }
+            } catch (e: Exception) {
+                notice = handle(e)
+            }
+            showLocal()
+        }
+    }
+
+    fun markRows(target: List<ThreadRow>, read: Boolean) {
+        val ids = target.flatMap { it.ids }
+        if (ids.isEmpty()) return
+        selected.clear()
+        messages = messages.map { if (it.id in ids) it.copy(isRead = read) else it }
+        viewModelScope.launch {
+            try {
+                repo.readAll(ids, read)
+            } catch (e: Exception) {
+                notice = handle(e)
+            }
+            showLocal()
+        }
+    }
+
+    /** Sort des conversations de la corbeille : chaque message retourne d'où il venait. */
+    fun restoreRows(target: List<ThreadRow>) {
+        val ids = target.flatMap { it.ids }
+        if (ids.isEmpty()) return
+        val outgoing = messages.filter { it.id in ids && it.outgoing }.map { it.id }
+        val incoming = ids - outgoing.toSet()
+        selected.clear()
+        messages = messages.filter { it.id !in ids }
+        viewModelScope.launch {
+            try {
+                if (incoming.isNotEmpty()) repo.moveAll(incoming, "inbox")
+                if (outgoing.isNotEmpty()) repo.moveAll(outgoing, "sent")
+                say(if (ids.size == 1) "Message restauré." else "${ids.size} messages restaurés.")
+            } catch (e: Exception) {
+                notice = handle(e)
+            }
+            showLocal()
+        }
+    }
+
+    /** Suppression définitive, depuis la corbeille. */
+    fun deleteRows(target: List<ThreadRow>) {
+        val ids = target.flatMap { it.ids }
+        if (ids.isEmpty()) return
+        selected.clear()
+        messages = messages.filter { it.id !in ids }
+        viewModelScope.launch {
+            try {
+                repo.deleteAll(ids)
+                say(if (ids.size == 1) "Message supprimé définitivement." else "${ids.size} messages supprimés définitivement.")
+            } catch (e: Exception) {
+                notice = handle(e)
+            }
+            showLocal()
+            refresh()
+        }
+    }
+
     // -------------------------------------------------------------- lecture
+
+    /** Ouvre une conversation par son dernier message, et marque lus ceux qu'elle regroupe. */
+    fun openRow(row: ThreadRow) {
+        open(row.item.id)
+        val others = messages.filter { it.id in row.ids && it.id != row.item.id && !it.isRead }.map { it.id }
+        if (others.isEmpty()) return
+        messages = messages.map { if (it.id in others) it.copy(isRead = true) else it }
+        viewModelScope.launch {
+            try {
+                repo.readAll(others, true)
+            } catch (e: Exception) {
+                // Sans réseau, l'état « lu » sera corrigé à la prochaine relève.
+            }
+        }
+    }
+
+    /** Passe au message précédent ou suivant de la conversation ouverte. */
+    fun openSibling(step: Int) {
+        val current = opened?.item?.id ?: return
+        val index = thread.indexOfFirst { it.id == current }
+        val target = thread.getOrNull(index + step) ?: return
+        if (index >= 0) open(target.id)
+    }
 
     fun open(id: String) {
         readerJob?.cancel()
         opened = null
         readerError = null
+        if (thread.none { it.id == id }) thread = emptyList()
         screen = Screen.Reader(id)
         readerJob = viewModelScope.launch {
             try {
                 val mail = repo.open(id)
                 opened = mail
+                if (thread.isEmpty() && mail.item.threadCount > 1) {
+                    launch {
+                        try {
+                            val all = repo.thread(mail.item.threadId)
+                            if (opened?.item?.id == id && all.size > 1) thread = all
+                        } catch (e: Exception) {
+                            // La conversation reste lisible message par message.
+                        }
+                    }
+                }
                 if (!mail.item.isRead) {
                     messages = messages.map { if (it.id == id) it.copy(isRead = true) else it }
                     if (mail.item.folder == "inbox") unread = maxOf(0, unread - 1)
@@ -324,10 +531,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 readerJob?.cancel()
                 opened = null
                 readerError = null
+                thread = emptyList()
                 screen = Screen.Mailbox
                 showLocal()
             }
-            Screen.Compose -> screen = composeReturn
+            Screen.Compose -> closeComposer()
             else -> Unit
         }
     }
@@ -335,6 +543,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun leaveReader(done: String) {
         notice = done
         opened = null
+        thread = emptyList()
         screen = Screen.Mailbox
         showLocal()
         refresh()
@@ -384,36 +593,158 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     // ------------------------------------------------------------ rédaction
 
-    fun compose() {
-        if (draftReplyTo != null) clearDraft()
-        composeReturn = screen
+    private fun hasContent(): Boolean =
+        draftTo.isNotBlank() || draftCc.isNotBlank() || draftSubject.isNotBlank() || draftText.isNotBlank() || draftFiles.isNotEmpty()
+
+    /** Photographie du message en cours, pour savoir s'il a changé depuis son ouverture. */
+    private fun snapshot(): String =
+        listOf(draftTo, draftCc, draftSubject, draftText, draftFiles.joinToString("|") { it.uploadId ?: it.uri.toString() })
+            .joinToString("\u0001")
+
+    private fun showComposer(from: Screen = screen) {
+        baseline = snapshot()
+        composeReturn = if (from == Screen.Compose) Screen.Mailbox else from
         sendError = null
         screen = Screen.Compose
+    }
+
+    fun compose() {
+        // Un texte resté là faute de réseau pour l'enregistrer est proposé à nouveau.
+        val leftover = hasContent()
+        if (!leftover) clearDraft()
+        showComposer()
+        if (leftover) baseline = ""
     }
 
     /** Nouveau message pour une adresse touchée dans un mail. */
     fun composeTo(address: String) {
         clearDraft()
         draftTo = address.trim()
-        composeReturn = screen
-        screen = Screen.Compose
+        showComposer()
+        baseline = ""
     }
 
-    fun reply() {
+    fun openDraft(draft: Draft) {
+        clearDraft()
+        draftTo = draft.to
+        draftCc = draft.cc
+        draftSubject = draft.subject
+        draftText = draft.text
+        draftReplyTo = draft.replyToId
+        draftId = draft.id
+        draft.files.forEach { draftFiles.add(DraftFile(Uri.EMPTY, it.name, it.type, it.size, it.id)) }
+        showComposer()
+    }
+
+    private fun replyTarget(current: OpenedMail): String =
+        current.mail.replyTo.firstOrNull()?.address?.ifBlank { null }
+            ?: current.mail.from.firstOrNull()?.address?.ifBlank { null }
+            ?: current.item.fromAddr
+
+    /** Les autres destinataires du message, hors soi-même et hors la personne à qui l'on répond. */
+    private fun othersOf(current: OpenedMail): List<String> {
+        val skip = setOf(repo.prefs.address.lowercase(), replyTarget(current).lowercase())
+        return (current.mail.to + current.mail.cc)
+            .map { it.address.trim() }
+            .filter { it.isNotBlank() && it.lowercase() !in skip }
+            .distinctBy { it.lowercase() }
+    }
+
+    val canReplyAll: Boolean
+        get() {
+            val current = opened ?: return false
+            return !current.item.outgoing && othersOf(current).isNotEmpty()
+        }
+
+    fun reply(all: Boolean = false) {
         val current = opened ?: return
         clearDraft()
-        val mail = current.mail
-        val target = mail.replyTo.firstOrNull()?.address?.ifBlank { null }
-            ?: mail.from.firstOrNull()?.address?.ifBlank { null }
-            ?: current.item.fromAddr
-        val subject = mail.subject.ifBlank { current.item.subject }
-        draftTo = target
+        val subject = current.mail.subject.ifBlank { current.item.subject }
+        draftTo = replyTarget(current)
+        if (all) draftCc = othersOf(current).joinToString(", ")
         draftSubject = if (Regex("^\\s*re\\s*:", RegexOption.IGNORE_CASE).containsMatchIn(subject)) subject else "Re: $subject"
         draftText = quote(current)
         draftReplyTo = current.item.id
-        composeReturn = screen
-        sendError = null
-        screen = Screen.Compose
+        showComposer()
+    }
+
+    /** Transfère le message ouvert, pièces jointes comprises. */
+    fun forward() {
+        val current = opened ?: return
+        clearDraft()
+        val mail = current.mail
+        val subject = mail.subject.ifBlank { current.item.subject }
+        val source = mail.text?.takeIf { it.isNotBlank() } ?: mail.html?.let { Mime.htmlToText(it) }.orEmpty()
+        draftSubject = if (Regex("^\\s*(fwd?|tr)\\s*:", RegexOption.IGNORE_CASE).containsMatchIn(subject)) subject else "Fwd: $subject"
+        draftText = buildString {
+            append("\n\n---------- Message transféré ----------\n")
+            append("De : ").append(mail.from.joinToString(", ") { it.label }.ifBlank { current.item.fromAddr }).append('\n')
+            append("Date : ").append(longDate(mail.date ?: current.item.date)).append('\n')
+            append("Objet : ").append(subject).append('\n')
+            append("À : ").append(mail.to.joinToString(", ") { it.label }.ifBlank { current.item.toAddr }).append("\n\n")
+            append(source.trim()).append('\n')
+        }
+        mail.attachments.forEach { draftFiles.add(DraftFile(Uri.fromFile(it.file), it.name, it.type, it.size)) }
+        showComposer()
+        if (current.sentFiles.isNotEmpty()) {
+            // Les fichiers d'un message envoyé sont sur le serveur : on les récupère pour les joindre à nouveau.
+            viewModelScope.launch {
+                for (remote in current.sentFiles) {
+                    val file = fetchSentFile(current.item.id, remote) ?: continue
+                    draftFiles.add(DraftFile(Uri.fromFile(file.file), file.name, file.type, file.size))
+                }
+                baseline = snapshot()
+            }
+        }
+    }
+
+    /** Fermeture de la rédaction : ce qui a été écrit est gardé dans les brouillons. */
+    private fun closeComposer() {
+        if (sending) return
+        val target = composeReturn
+        if (snapshot() == baseline) {
+            clearDraft()
+            screen = target
+            return
+        }
+        if (!hasContent()) {
+            discardDraft()
+            return
+        }
+        sending = true
+        viewModelScope.launch {
+            try {
+                val ids = uploadPending()
+                val id = draftId ?: UUID.randomUUID().toString()
+                repo.api.saveDraft(id, draftTo, draftCc, draftSubject, draftText, draftReplyTo, ids)
+                clearDraft()
+                say("Brouillon enregistré.")
+                if (folder == "drafts") loadDrafts()
+            } catch (e: Exception) {
+                // Rien n'est perdu : le texte reste dans la fenêtre de rédaction.
+                val reason = handle(e)
+                if (reason != null) notice = "Brouillon non enregistré : il reste ouvert dans « Écrire ». $reason"
+            }
+            sending = false
+            if (screen == Screen.Compose) screen = target
+        }
+    }
+
+    fun discardDraft() {
+        val id = draftId
+        val uploaded = draftFiles.mapNotNull { it.uploadId }
+        val target = composeReturn
+        clearDraft()
+        screen = target
+        viewModelScope.launch {
+            try {
+                if (id != null) repo.api.deleteDraft(id) else uploaded.forEach { repo.api.deleteUpload(it) }
+                if (id != null) say("Brouillon supprimé.")
+                if (folder == "drafts") loadDrafts()
+            } catch (e: Exception) {
+                notice = handle(e)
+            }
+        }
     }
 
     private fun quote(current: OpenedMail): String {
@@ -432,6 +763,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         draftText = ""
         draftFiles.clear()
         draftReplyTo = null
+        draftId = null
         sendError = null
     }
 
@@ -496,29 +828,35 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         sendError = null
         viewModelScope.launch {
             try {
-                val ids = ArrayList<String>()
-                for (index in draftFiles.indices) {
-                    val file = draftFiles[index]
-                    val existing = file.uploadId
-                    if (existing != null) {
-                        ids.add(existing)
-                        continue
-                    }
-                    val id = UUID.randomUUID().toString()
-                    uploadFile(id, file)
-                    draftFiles[index] = file.copy(uploadId = id)
-                    ids.add(id)
-                }
-                val stored = repo.api.send(draftTo, draftCc, draftSubject, draftText, draftReplyTo, ids)
+                val ids = uploadPending()
+                val stored = repo.api.send(draftTo, draftCc, draftSubject, draftText, draftReplyTo, ids, draftId)
                 clearDraft()
                 notice = if (stored) "Message envoyé." else "Message envoyé, mais sa copie n'a pas pu être rangée dans Envoyés."
                 screen = composeReturn
-                if (folder == "sent") refresh()
+                if (folder == "sent" || folder == "drafts") refresh()
             } catch (e: Exception) {
                 sendError = handle(e)
             }
             sending = false
         }
+    }
+
+    /** Dépose sur le serveur les fichiers qui n'y sont pas encore ; renvoie les identifiants de tous. */
+    private suspend fun uploadPending(): List<String> {
+        val ids = ArrayList<String>()
+        for (index in draftFiles.indices) {
+            val file = draftFiles[index]
+            val existing = file.uploadId
+            if (existing != null) {
+                ids.add(existing)
+                continue
+            }
+            val id = UUID.randomUUID().toString()
+            uploadFile(id, file)
+            draftFiles[index] = file.copy(uploadId = id)
+            ids.add(id)
+        }
+        return ids
     }
 
     private suspend fun uploadFile(id: String, file: DraftFile) {

@@ -18,9 +18,25 @@ data class MailItem(
     val date: Long,
     val size: Long,
     val isRead: Boolean,
+    /** Conversation à laquelle le message appartient : l'identifiant de son premier message. */
+    val threadId: String = id,
+    /** Nombre de messages de cette conversation, tous dossiers confondus sauf la corbeille. */
+    val threadCount: Int = 1,
 ) {
     val outgoing: Boolean get() = direction == "out"
 }
+
+/** Un message commencé et gardé sur le serveur, à reprendre depuis l'appli ou le webmail. */
+data class Draft(
+    val id: String,
+    val to: String,
+    val cc: String,
+    val subject: String,
+    val text: String,
+    val replyToId: String?,
+    val updated: Long,
+    val files: List<RemoteFile>,
+)
 
 /** Une pièce jointe d'un message envoyé, conservée sur le serveur. */
 data class RemoteFile(val id: String, val name: String, val type: String, val size: Long)
@@ -29,6 +45,7 @@ data class Folder(val id: String, val label: String, val empty: String)
 
 val FOLDERS = listOf(
     Folder("inbox", "Réception", "Aucun message pour l'instant. Les mails envoyés à ton adresse arriveront ici."),
+    Folder("drafts", "Brouillons", "Aucun brouillon. Un message fermé avant l'envoi est gardé ici."),
     Folder("sent", "Envoyés", "Tu n'as encore rien envoyé depuis cette boîte."),
     Folder("archive", "Archives", "Aucun message archivé."),
     Folder("trash", "Corbeille", "La corbeille est vide."),
@@ -76,7 +93,7 @@ class Prefs(context: Context) {
 }
 
 /** Copie locale des listes de messages, pour la lecture hors connexion. */
-class Db(context: Context) : SQLiteOpenHelper(context, "courrier.db", null, 1) {
+class Db(context: Context) : SQLiteOpenHelper(context, "courrier.db", null, 2) {
 
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL(
@@ -90,10 +107,13 @@ class Db(context: Context) : SQLiteOpenHelper(context, "courrier.db", null, 1) {
                 subject TEXT NOT NULL,
                 date INTEGER NOT NULL,
                 size INTEGER NOT NULL,
-                is_read INTEGER NOT NULL
+                is_read INTEGER NOT NULL,
+                thread_id TEXT NOT NULL,
+                thread_count INTEGER NOT NULL
             )"""
         )
         db.execSQL("CREATE INDEX idx_messages_folder_date ON messages (folder, date DESC)")
+        db.execSQL("CREATE INDEX idx_messages_thread ON messages (thread_id)")
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -112,9 +132,11 @@ class Db(context: Context) : SQLiteOpenHelper(context, "courrier.db", null, 1) {
         date = getLong(7),
         size = getLong(8),
         isRead = getInt(9) != 0,
+        threadId = getString(10),
+        threadCount = getInt(11),
     )
 
-    private val columns = "id, folder, direction, from_addr, from_name, to_addr, subject, date, size, is_read"
+    private val columns = "id, folder, direction, from_addr, from_name, to_addr, subject, date, size, is_read, thread_id, thread_count"
 
     fun list(folder: String, query: String = ""): List<MailItem> {
         val args = mutableListOf(folder)
@@ -154,6 +176,18 @@ class Db(context: Context) : SQLiteOpenHelper(context, "courrier.db", null, 1) {
         put("date", item.date)
         put("size", item.size)
         put("is_read", if (item.isRead) 1 else 0)
+        put("thread_id", item.threadId)
+        put("thread_count", item.threadCount)
+    }
+
+    /** Les messages d'une conversation connus de l'appareil, du plus ancien au plus récent. */
+    fun thread(threadId: String): List<MailItem> {
+        val out = ArrayList<MailItem>()
+        readableDatabase.rawQuery(
+            "SELECT $columns FROM messages WHERE thread_id = ? AND folder != 'trash' ORDER BY date ASC",
+            arrayOf(threadId)
+        ).use { c -> while (c.moveToNext()) out.add(c.toItem()) }
+        return out
     }
 
     fun upsert(items: List<MailItem>) {

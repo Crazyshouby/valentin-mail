@@ -86,9 +86,11 @@ class Repo private constructor(context: Context) {
             try {
                 if (item == null || item.outgoing) {
                     val detail = api.detail(id)
-                    item = detail.first
+                    // Le détail ne dit pas la taille de la conversation : on garde celle qu'on connaît.
+                    val fresh = detail.first.copy(threadCount = item?.threadCount ?: 1)
+                    item = fresh
                     sentFiles = detail.second
-                    withContext(Dispatchers.IO) { db.upsert(listOf(detail.first)) }
+                    withContext(Dispatchers.IO) { db.upsert(listOf(fresh)) }
                 }
                 if (!file.exists()) api.downloadRaw(id, file)
             } catch (e: OfflineException) {
@@ -111,6 +113,37 @@ class Repo private constructor(context: Context) {
     suspend fun move(id: String, folder: String) {
         api.patch(id, folder = folder)
         withContext(Dispatchers.IO) { db.setFolder(id, folder) }
+    }
+
+    /** La conversation complète ; sans réseau, ce que l'appareil en connaît. */
+    suspend fun thread(threadId: String): List<MailItem> =
+        try {
+            val items = api.thread(threadId)
+            withContext(Dispatchers.IO) { db.upsert(items) }
+            items
+        } catch (e: OfflineException) {
+            withContext(Dispatchers.IO) { db.thread(threadId) }
+        }
+
+    suspend fun moveAll(ids: List<String>, folder: String) {
+        api.batch(ids, folder = folder)
+        withContext(Dispatchers.IO) { ids.forEach { db.setFolder(it, folder) } }
+    }
+
+    suspend fun readAll(ids: List<String>, read: Boolean) {
+        withContext(Dispatchers.IO) { ids.forEach { db.setRead(it, read) } }
+        api.batch(ids, isRead = read)
+    }
+
+    /** Suppression définitive de messages déjà à la corbeille. */
+    suspend fun deleteAll(ids: List<String>) {
+        api.batch(ids, delete = true)
+        withContext(Dispatchers.IO) {
+            ids.forEach {
+                db.delete(it)
+                forget(it)
+            }
+        }
     }
 
     /** Renvoie vrai si le message a été supprimé pour de bon. */

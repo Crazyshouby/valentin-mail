@@ -12,7 +12,9 @@ import androidx.activity.viewModels
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
@@ -54,13 +56,23 @@ fun App(vm: MainViewModel) {
     val notice = vm.notice
     LaunchedEffect(notice) {
         if (notice != null) {
-            snackbar.showSnackbar(notice)
+            // Un geste rapide (glisser, action groupée) peut être annulé depuis le message qui le confirme.
+            val undo = vm.undoFor == notice
+            val result = snackbar.showSnackbar(
+                message = notice,
+                actionLabel = if (undo) "Annuler" else null,
+                duration = if (undo) SnackbarDuration.Long else SnackbarDuration.Short,
+            )
+            if (result == SnackbarResult.ActionPerformed) vm.undoLast()
             vm.notice = null
         }
     }
 
     val screen = vm.screen
-    BackHandler(enabled = screen is Screen.Reader || screen == Screen.Compose) { vm.back() }
+    val selecting = screen == Screen.Mailbox && vm.selected.isNotEmpty()
+    BackHandler(enabled = screen is Screen.Reader || screen == Screen.Compose || selecting) {
+        if (selecting) vm.clearSelection() else vm.back()
+    }
 
     Box(Modifier.fillMaxSize().background(Paper)) {
         when (screen) {
