@@ -41,7 +41,49 @@ class Repo private constructor(context: Context) {
 
     /** L'état actuel de messages déjà affichés (résultats d'une recherche), dans le même ordre. */
     suspend fun known(ids: List<String>, folder: String): List<MailItem> =
-        withContext(Dispatchers.IO) { ids.mapNotNull { db.get(it) }.filter { it.folder == folder } }
+        withContext(Dispatchers.IO) { ids.mapNotNull { db.get(it) }.filter { it.isIn(folder) } }
+
+    /** Les dossiers personnels connus à la dernière relève, sans leurs compteurs. */
+    fun cachedLabels(): List<Label> =
+        prefs.labelsCache.split('\n').mapNotNull { line ->
+            val tab = line.indexOf('\t')
+            if (tab < 1) null else Label(line.substring(0, tab), line.substring(tab + 1))
+        }
+
+    /** Les dossiers personnels ; sans réseau, ceux de la dernière relève. */
+    suspend fun labels(): List<Label> =
+        try {
+            val fresh = api.labels()
+            prefs.labelsCache = fresh.joinToString("\n") { "${it.id}\t${it.name}" }
+            fresh
+        } catch (e: OfflineException) {
+            cachedLabels()
+        }
+
+    /** Range des messages dans un dossier personnel ; [leaveInbox] en sort ceux qui étaient en réception. */
+    suspend fun file(ids: List<String>, label: String, leaveInbox: Boolean = true) {
+        if (ids.isEmpty()) return
+        api.batch(ids, addLabels = listOf(label), leaveInbox = leaveInbox)
+        withContext(Dispatchers.IO) {
+            for (id in ids) {
+                val item = db.get(id) ?: continue
+                db.setLabels(id, (item.labels + label).distinct())
+                if (leaveInbox && item.folder == "inbox") db.setFolder(id, "archive")
+            }
+        }
+    }
+
+    /** Sort des messages d'un dossier personnel ; ils restent où ils sont par ailleurs. */
+    suspend fun unfile(ids: List<String>, label: String) {
+        if (ids.isEmpty()) return
+        api.batch(ids, removeLabels = listOf(label))
+        withContext(Dispatchers.IO) {
+            for (id in ids) {
+                val item = db.get(id) ?: continue
+                db.setLabels(id, item.labels - label)
+            }
+        }
+    }
 
     /** Première page d'un dossier : met la copie locale à jour, et prépare la lecture hors connexion. */
     suspend fun refresh(folder: String, query: String): ListPage {

@@ -179,8 +179,14 @@ fun SettingsScreen(vm: MainViewModel, snackbar: SnackbarHostState) {
                         Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, top = 6.dp, bottom = 6.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
+                        val where = vm.labelName(rule.target.orEmpty()) ?: "un dossier"
+                        val what = when (rule.action) {
+                            "label" -> "ranger dans « $where »"
+                            "file" -> "ranger dans « $where », sans passer par la réception"
+                            else -> labelOf(RULE_ACTIONS, rule.action)
+                        }
                         Text(
-                            "Si ${labelOf(RULE_FIELDS, rule.field)} contient « ${rule.value} » : ${labelOf(RULE_ACTIONS, rule.action)}",
+                            "Si ${labelOf(RULE_FIELDS, rule.field)} contient « ${rule.value} » : $what",
                             modifier = Modifier.weight(1f),
                             style = MaterialTheme.typography.bodyMedium,
                         )
@@ -194,6 +200,8 @@ fun SettingsScreen(vm: MainViewModel, snackbar: SnackbarHostState) {
                 var field by rememberSaveable { mutableStateOf("from") }
                 var action by rememberSaveable { mutableStateOf("archive") }
                 var value by rememberSaveable { mutableStateOf("") }
+                var target by rememberSaveable { mutableStateOf("") }
+                val needsFolder = action == "label" || action == "file"
                 Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text("Si", modifier = Modifier.width(52.dp), color = Muted)
@@ -211,12 +219,32 @@ fun SettingsScreen(vm: MainViewModel, snackbar: SnackbarHostState) {
                         Text("alors", modifier = Modifier.width(52.dp), color = Muted)
                         Choice(RULE_ACTIONS, action, onPick = { action = it }, tag = "regle-action")
                     }
+                    if (needsFolder) {
+                        if (vm.labels.isEmpty()) {
+                            Text(
+                                "Crée d'abord un dossier, depuis le menu en haut à gauche de la boîte.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Muted,
+                            )
+                        } else {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text("dans", modifier = Modifier.width(52.dp), color = Muted)
+                                Choice(
+                                    vm.labels.map { it.id to it.name },
+                                    target,
+                                    onPick = { target = it },
+                                    tag = "regle-dossier",
+                                    placeholder = "choisir un dossier",
+                                )
+                            }
+                        }
+                    }
                     Button(
                         onClick = {
-                            vm.addRule(field, value, action)
+                            vm.addRule(field, value, action, if (needsFolder) target else null)
                             value = ""
                         },
-                        enabled = value.isNotBlank() && !vm.settingsBusy,
+                        enabled = value.isNotBlank() && !vm.settingsBusy && (!needsFolder || vm.labels.any { it.id == target }),
                     ) { Text("Ajouter la règle") }
                 }
             }
@@ -272,10 +300,18 @@ private fun SectionTitle(title: String, help: String) {
 
 /** Un choix parmi quelques possibilités : le bouton montre la valeur, un menu propose les autres. */
 @Composable
-private fun Choice(options: List<Pair<String, String>>, selected: String, onPick: (String) -> Unit, tag: String) {
+private fun Choice(
+    options: List<Pair<String, String>>,
+    selected: String,
+    onPick: (String) -> Unit,
+    tag: String,
+    placeholder: String = "",
+) {
     var open by remember { mutableStateOf(false) }
     Box {
-        OutlinedButton(onClick = { open = true }, modifier = Modifier.testTag(tag)) { Text(labelOf(options, selected)) }
+        OutlinedButton(onClick = { open = true }, modifier = Modifier.testTag(tag)) {
+            Text(labelOf(options, selected).ifBlank { placeholder })
+        }
         DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
             options.forEach { (id, label) ->
                 DropdownMenuItem(

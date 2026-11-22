@@ -396,6 +396,60 @@ class E2eTest {
         rule.onNodeWithContentDescription("Chercher dans ce dossier").performClick()
         rule.waitUntil(30_000) { vm.query.isEmpty() && vm.messages.any { it.subject.startsWith("Votre commande") } }
 
+        // ---- dossiers personnels : en créer deux, dont un sous-dossier
+        rule.onNodeWithTag("bouton-dossiers").performClick()
+        waitText("Nouveau dossier")
+        waitText("Aucun dossier pour l'instant")
+        rule.onNodeWithTag("nouveau-dossier").performClick()
+        waitText("Nom du dossier")
+        rule.onNodeWithTag("nom-dossier").performTextInput("Clients")
+        rule.onNodeWithText("Créer").performClick()
+        rule.waitUntil(30_000) { vm.labels.any { it.name == "Clients" } && !vm.labelBusy }
+        rule.onNodeWithTag("nouveau-dossier").performClick()
+        waitText("Nom du dossier")
+        rule.onNodeWithTag("nom-dossier").performTextInput("Clients/Affiches")
+        rule.onNodeWithText("Créer").performClick()
+        rule.waitUntil(30_000) { vm.labels.size == 2 && !vm.labelBusy }
+        waitText("Affiches")
+        shot("16c-dossiers")
+        instrumentation.uiAutomation.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
+        waitGone("Nouveau dossier")
+
+        // ---- ranger un message depuis la lecture : il quitte la réception et gagne son dossier
+        rule.onNodeWithText("Votre commande est partie").performClick()
+        waitText("facture.txt")
+        menu("Ranger dans…")
+        rule.onNodeWithTag("ranger-Clients").performClick()
+        rule.waitUntil(30_000) { vm.opened?.item?.let { it.labels.size == 1 && it.folder == "archive" } == true }
+        waitText("Rangé dans « Clients »")
+        shot("16d-message-range")
+        settle()
+        backToList()
+        rule.waitUntil(30_000) { vm.messages.none { it.subject.startsWith("Votre commande") } }
+
+        // ---- ranger une conversation depuis la liste, puis annuler
+        rule.onNodeWithText("Re: Devis pour l'affiche").performTouchInput { longClick() }
+        waitText("1 sélectionné")
+        menu("Ranger dans…")
+        rule.onNodeWithTag("ranger-Clients/Affiches").performClick()
+        waitText("rangés dans « Clients/Affiches »")
+        rule.waitUntil(30_000) { vm.messages.none { it.subject.contains("Devis") } }
+        rule.onNodeWithText("Annuler").performClick()
+        rule.waitUntil(30_000) { vm.messages.any { it.subject == "Re: Devis pour l'affiche" && it.labels.isEmpty() } }
+        waitText("Re: Devis pour l'affiche")
+        settle()
+
+        // ---- ouvrir le dossier : le message rangé s'y trouve, un bandeau dit où l'on est
+        rule.onNodeWithTag("bouton-dossiers").performClick()
+        waitText("Nouveau dossier")
+        rule.onNodeWithTag("dossier-Clients").performClick()
+        rule.waitUntil(30_000) { labelIdOf(vm.folder) != null && vm.messages.any { it.subject.startsWith("Votre commande") } }
+        rule.onNodeWithTag("bandeau-dossier").assertTextContains("Clients")
+        shot("16e-dans-un-dossier")
+        rule.onNodeWithContentDescription("Fermer le dossier et revenir à la réception").performClick()
+        rule.waitUntil(30_000) { vm.folder == "inbox" && vm.messages.any { it.subject == "Re: Devis pour l'affiche" } }
+        waitText("Réception")
+
         menu("Adresses et règles")
         waitText("Tes adresses")
         waitText("adresse principale")
@@ -407,6 +461,17 @@ class E2eTest {
         rule.onNodeWithTag("regle-texte").performScrollTo().performTextInput("infolettre")
         rule.onNodeWithText("Ajouter la règle").performScrollTo().performClick()
         waitText("contient « infolettre »")
+        rule.waitUntil(30_000) { !vm.settingsBusy }
+        // Une règle qui range dans un dossier en laissant le message en réception.
+        rule.onNodeWithTag("regle-action").performScrollTo().performClick()
+        waitText("ranger dans un dossier")
+        rule.onNodeWithText("ranger dans un dossier").performClick()
+        rule.onNodeWithTag("regle-dossier").performScrollTo().performClick()
+        waitText("Clients/Affiches")
+        rule.onNodeWithText("Clients").performClick()
+        rule.onNodeWithTag("regle-texte").performScrollTo().performTextInput("client@example.com")
+        rule.onNodeWithText("Ajouter la règle").performScrollTo().performClick()
+        waitText("ranger dans « Clients »")
         rule.waitUntil(30_000) { !vm.settingsBusy }
         shot("17-adresses-et-regles")
         rule.onNodeWithTag("signature").performScrollTo().performTextInput("Valentin, essai")
@@ -420,6 +485,7 @@ class E2eTest {
         menu("Actualiser")
         waitText("Demande de devis")
         assertTrue("le message visé par la règle n'est pas en réception", vm.messages.none { it.subject == "Numero 7" })
+        rule.waitUntil(30_000) { vm.messages.any { it.subject == "Demande de devis" && it.labels.size == 1 } }
         rule.onNodeWithText("Archives").performClick()
         waitText("Numero 7")
         rule.onNodeWithText("Réception").performClick()

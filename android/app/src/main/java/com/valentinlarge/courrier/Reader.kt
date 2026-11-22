@@ -90,6 +90,7 @@ fun ReaderScreen(vm: MainViewModel, snackbar: SnackbarHostState) {
 
     var menu by remember { mutableStateOf(false) }
     var confirmDelete by remember { mutableStateOf(false) }
+    var filing by remember { mutableStateOf(false) }
     var link by remember { mutableStateOf<Uri?>(null) }
     var toSave by remember { mutableStateOf<LocalFile?>(null) }
     val saver = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("*/*")) { target ->
@@ -135,6 +136,12 @@ fun ReaderScreen(vm: MainViewModel, snackbar: SnackbarHostState) {
                                         DropdownMenuItem(text = { Text("Transférer") }, onClick = {
                                             menu = false
                                             vm.forward()
+                                        })
+                                    }
+                                    if (item.folder != "trash") {
+                                        DropdownMenuItem(text = { Text("Ranger dans…") }, onClick = {
+                                            menu = false
+                                            filing = true
                                         })
                                     }
                                     if (item.folder == "inbox") {
@@ -219,6 +226,20 @@ fun ReaderScreen(vm: MainViewModel, snackbar: SnackbarHostState) {
         )
     }
 
+    if (filing) {
+        opened?.item?.let { item ->
+            FilePicker(
+                vm,
+                current = item.labels,
+                onDismiss = { filing = false },
+                onPick = { label ->
+                    filing = false
+                    vm.toggleLabel(label)
+                },
+            )
+        }
+    }
+
     if (confirmDelete) {
         AlertDialog(
             onDismissRequest = { confirmDelete = false },
@@ -254,7 +275,7 @@ private fun ColumnScope.Message(
             opened.sentFiles.map { Piece(it.name, it.size, null, it) }
     }
 
-    Header(opened)
+    Header(opened, vm.labelNames(opened.item.labels))
 
     if (pieces.isNotEmpty()) {
         Row(
@@ -353,7 +374,7 @@ private fun Waiting(error: String?, onRetry: () -> Unit) {
 }
 
 @Composable
-private fun Header(opened: OpenedMail) {
+private fun Header(opened: OpenedMail, folders: List<String>) {
     val item = opened.item
     val mail = opened.mail
     var details by rememberSaveable(item.id) { mutableStateOf(false) }
@@ -376,6 +397,7 @@ private fun Header(opened: OpenedMail) {
             Spacer(Modifier.width(10.dp))
             Text(shortDate(date), style = MaterialTheme.typography.bodySmall, color = Muted)
         }
+        LabelChips(folders, Modifier.padding(top = 6.dp, bottom = 2.dp))
         if (details) {
             Spacer(Modifier.height(6.dp))
             Meta("De", mail.from.joinToString(", ") { it.label }.ifBlank { item.fromAddr })

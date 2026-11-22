@@ -73,8 +73,14 @@ fun App(vm: MainViewModel) {
 
     val screen = vm.screen
     val selecting = screen == Screen.Mailbox && vm.selected.isNotEmpty()
-    BackHandler(enabled = screen is Screen.Reader || screen == Screen.Compose || screen == Screen.Settings || selecting) {
-        if (selecting) vm.clearSelection() else vm.back()
+    // Depuis un dossier personnel, le bouton retour ramène à la réception avant de quitter l'appli.
+    val inFolder = screen == Screen.Mailbox && labelIdOf(vm.folder) != null
+    BackHandler(enabled = screen is Screen.Reader || screen == Screen.Compose || screen == Screen.Settings || selecting || inFolder) {
+        when {
+            selecting -> vm.clearSelection()
+            inFolder -> vm.selectFolder("inbox")
+            else -> vm.back()
+        }
     }
 
     Box(Modifier.fillMaxSize().background(Paper)) {

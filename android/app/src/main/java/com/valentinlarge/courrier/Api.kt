@@ -120,6 +120,7 @@ class Api(private val prefs: Prefs) {
         isRead = optInt("is_read") != 0,
         threadId = optString("thread_id").ifBlank { getString("id") },
         threadCount = maxOf(1, optInt("thread_count", 1)),
+        labels = optJSONArray("labels")?.let { a -> (0 until a.length()).map { a.optString(it) }.filter { it.isNotBlank() } } ?: emptyList(),
     )
 
     private fun JSONArray?.toFiles(): List<RemoteFile> {
@@ -207,12 +208,19 @@ class Api(private val prefs: Prefs) {
         val array = json(request("/api/rules").get().build()).optJSONArray("rules") ?: JSONArray()
         (0 until array.length()).map { i ->
             val o = array.getJSONObject(i)
-            Rule(o.getString("id"), o.optString("field"), o.optString("value"), o.optString("action"))
+            Rule(
+                o.getString("id"),
+                o.optString("field"),
+                o.optString("value"),
+                o.optString("action"),
+                if (o.isNull("target")) null else o.optString("target").ifBlank { null },
+            )
         }
     }
 
-    suspend fun saveRule(id: String, field: String, value: String, action: String) = withContext(Dispatchers.IO) {
+    suspend fun saveRule(id: String, field: String, value: String, action: String, target: String? = null) = withContext(Dispatchers.IO) {
         val body = JSONObject().put("field", field).put("value", value).put("action", action)
+        if (target != null) body.put("target", target)
         json(request("/api/rules/$id").put(body.toString().toRequestBody(jsonType)).build())
         Unit
     }
@@ -225,7 +233,9 @@ class Api(private val prefs: Prefs) {
     suspend fun list(folder: String, query: String = "", before: Long = 0, after: Long = 0): ListPage =
         withContext(Dispatchers.IO) {
             val params = LinkedHashMap<String, String>()
-            params["folder"] = folder
+            // Un dossier personnel se demande par son identifiant, un dossier de la boîte par son nom.
+            val label = labelIdOf(folder)
+            if (label != null) params["label"] = label else params["folder"] = folder
             if (query.isNotBlank()) params["q"] = query.trim()
             if (before > 0) params["before"] = before.toString()
             if (after > 0) params["after"] = after.toString()
@@ -250,14 +260,46 @@ class Api(private val prefs: Prefs) {
         items.map { it.copy(threadCount = maxOf(1, items.size)) }
     }
 
-    /** Une même action sur plusieurs messages : lu ou non lu, changement de dossier, suppression. */
-    suspend fun batch(ids: List<String>, isRead: Boolean? = null, folder: String? = null, delete: Boolean = false) =
+    /** Les dossiers personnels, avec leurs compteurs. */
+    suspend fun labels(): List<Label> = withContext(Dispatchers.IO) {
+        val array = json(request("/api/labels").get().build()).optJSONArray("labels") ?: JSONArray()
+        (0 until array.length()).map { i ->
+            val o = array.getJSONObject(i)
+            Label(o.getString("id"), o.optString("name"), o.optInt("total"), o.optInt("unread"))
+        }
+    }
+
+    /** Crée le dossier s'il n'existe pas, le renomme sinon. */
+    suspend fun saveLabel(id: String, name: String) = withContext(Dispatchers.IO) {
+        val body = JSONObject().put("name", name)
+        json(request("/api/labels/$id").put(body.toString().toRequestBody(jsonType)).build())
+        Unit
+    }
+
+    suspend fun deleteLabel(id: String) = withContext(Dispatchers.IO) {
+        json(request("/api/labels/$id").delete().build())
+        Unit
+    }
+
+    /** Une même action sur plusieurs messages : lu ou non lu, changement de dossier, rangement, suppression. */
+    suspend fun batch(
+        ids: List<String>,
+        isRead: Boolean? = null,
+        folder: String? = null,
+        delete: Boolean = false,
+        addLabels: List<String> = emptyList(),
+        removeLabels: List<String> = emptyList(),
+        leaveInbox: Boolean = false,
+    ) =
         withContext(Dispatchers.IO) {
             for (part in ids.distinct().chunked(100)) {
                 val body = JSONObject().put("ids", JSONArray(part))
                 if (isRead != null) body.put("is_read", isRead)
                 if (folder != null) body.put("folder", folder)
                 if (delete) body.put("delete", true)
+                if (addLabels.isNotEmpty()) body.put("add_labels", JSONArray(addLabels))
+                if (removeLabels.isNotEmpty()) body.put("remove_labels", JSONArray(removeLabels))
+                if (leaveInbox) body.put("leave_inbox", true)
                 json(request("/api/messages/batch").post(body.toString().toRequestBody(jsonType)).build())
             }
         }

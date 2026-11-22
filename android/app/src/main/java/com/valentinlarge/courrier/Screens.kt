@@ -1,5 +1,6 @@
 package com.valentinlarge.courrier
 
+import androidx.compose.material.icons.filled.Menu
 import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Build
@@ -203,6 +204,8 @@ fun MailboxScreen(vm: MainViewModel, snackbar: SnackbarHostState) {
     var menu by remember { mutableStateOf(false) }
     var confirmEmpty by remember { mutableStateOf(false) }
     var confirmDelete by remember { mutableStateOf(false) }
+    var folders by remember { mutableStateOf(false) }
+    var filing by remember { mutableStateOf(false) }
     val selecting = vm.selected.isNotEmpty()
     val isDrafts = vm.folder == "drafts"
 
@@ -214,9 +217,14 @@ fun MailboxScreen(vm: MainViewModel, snackbar: SnackbarHostState) {
         topBar = {
             Column(Modifier.background(Paper)) {
                 if (selecting) {
-                    SelectionBar(vm, onDeleteForever = { confirmDelete = true })
+                    SelectionBar(vm, onDeleteForever = { confirmDelete = true }, onFile = { filing = true })
                 } else {
                     TopAppBar(
+                        navigationIcon = {
+                            IconButton(onClick = { folders = true }, modifier = Modifier.testTag("bouton-dossiers")) {
+                                Icon(Icons.Filled.Menu, contentDescription = "Dossiers")
+                            }
+                        },
                         title = {
                             Column {
                                 Text("Courrier", style = MaterialTheme.typography.titleLarge)
@@ -270,7 +278,7 @@ fun MailboxScreen(vm: MainViewModel, snackbar: SnackbarHostState) {
                     )
                 }
                 AirmailStripe()
-                FolderTabs(vm)
+                if (labelIdOf(vm.folder) != null) FolderBanner(vm, onFolders = { folders = true }) else FolderTabs(vm)
                 if (searching && !isDrafts && !selecting) {
                     OutlinedTextField(
                         value = vm.query,
@@ -343,6 +351,20 @@ fun MailboxScreen(vm: MainViewModel, snackbar: SnackbarHostState) {
         )
     }
 
+    if (folders) FoldersSheet(vm, onClose = { folders = false })
+
+    if (filing) {
+        FilePicker(
+            vm,
+            current = emptyList(),
+            onDismiss = { filing = false },
+            onPick = { label ->
+                filing = false
+                vm.fileRows(vm.selectedRows(), label)
+            },
+        )
+    }
+
     if (confirmDelete) {
         AlertDialog(
             onDismissRequest = { confirmDelete = false },
@@ -364,7 +386,7 @@ private fun counted(count: Int, one: String, many: String): String = if (count =
 /** La barre du haut pendant une sélection : ce qu'on peut faire des lignes cochées. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun SelectionBar(vm: MainViewModel, onDeleteForever: () -> Unit) {
+private fun SelectionBar(vm: MainViewModel, onDeleteForever: () -> Unit, onFile: () -> Unit) {
     var menu by remember { mutableStateOf(false) }
     val count = vm.selected.size
     TopAppBar(
@@ -398,6 +420,18 @@ private fun SelectionBar(vm: MainViewModel, onDeleteForever: () -> Unit) {
                     Icon(Icons.Filled.MoreVert, contentDescription = "Autres actions")
                 }
                 DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                    if (vm.folder != "trash") {
+                        DropdownMenuItem(text = { Text("Ranger dans…") }, onClick = {
+                            menu = false
+                            onFile()
+                        })
+                    }
+                    if (labelIdOf(vm.folder) != null) {
+                        DropdownMenuItem(text = { Text("Sortir de ce dossier") }, onClick = {
+                            menu = false
+                            vm.unfileRows(vm.selectedRows())
+                        })
+                    }
                     DropdownMenuItem(text = { Text("Marquer lu") }, onClick = {
                         menu = false
                         vm.markRows(vm.selectedRows(), true)
@@ -440,6 +474,41 @@ private fun FolderTabs(vm: MainViewModel) {
                 },
             )
         }
+    }
+}
+
+/** À la place des onglets quand la liste montre un dossier personnel : son nom, et de quoi revenir à la réception. */
+@Composable
+private fun FolderBanner(vm: MainViewModel, onFolders: () -> Unit) {
+    val label = vm.currentLabel
+    Column {
+        Row(
+            Modifier.fillMaxWidth().background(BlueWash).height(48.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Row(
+                Modifier.weight(1f).fillMaxHeight().clickable(onClick = onFolders).testTag("bandeau-dossier").padding(start = 16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("Dossier", style = MaterialTheme.typography.bodySmall, color = Muted)
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    label?.name ?: "…",
+                    modifier = Modifier.weight(1f, fill = false),
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                if (label != null && label.unread > 0) {
+                    Spacer(Modifier.width(8.dp))
+                    Badge(containerColor = Blue, contentColor = OnBlue) { Text(label.unread.toString()) }
+                }
+            }
+            IconButton(onClick = { vm.selectFolder("inbox") }) {
+                Icon(Icons.Filled.Close, contentDescription = "Fermer le dossier et revenir à la réception")
+            }
+        }
+        HorizontalDivider(color = Line)
     }
 }
 
@@ -517,6 +586,7 @@ private fun SwipeRow(vm: MainViewModel, row: ThreadRow, selecting: Boolean) {
     ) {
         MessageRow(
             row,
+            tags = vm.tagsOf(row.item),
             selected = row.item.id in vm.selected,
             onClick = { if (selecting) vm.toggleSelect(row) else vm.openRow(row) },
             onLongClick = { vm.toggleSelect(row) },
@@ -526,7 +596,7 @@ private fun SwipeRow(vm: MainViewModel, row: ThreadRow, selecting: Boolean) {
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun MessageRow(row: ThreadRow, selected: Boolean, onClick: () -> Unit, onLongClick: () -> Unit) {
+private fun MessageRow(row: ThreadRow, tags: List<String>, selected: Boolean, onClick: () -> Unit, onLongClick: () -> Unit) {
     val item = row.item
     val unread = row.unread
     val who = if (item.outgoing) "À : ${item.toAddr}" else item.fromName.ifBlank { item.fromAddr }.ifBlank { "Expéditeur inconnu" }
@@ -566,14 +636,22 @@ private fun MessageRow(row: ThreadRow, selected: Boolean, onClick: () -> Unit, o
                     Spacer(Modifier.width(10.dp))
                     Text(shortDate(item.date), style = MaterialTheme.typography.bodySmall, color = Muted)
                 }
-                Text(
-                    item.subject.ifBlank { "(sans objet)" },
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = if (unread) Ink else Muted,
-                    fontWeight = if (unread) FontWeight.SemiBold else FontWeight.Normal,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        item.subject.ifBlank { "(sans objet)" },
+                        modifier = Modifier.weight(1f),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = if (unread) Ink else Muted,
+                        fontWeight = if (unread) FontWeight.SemiBold else FontWeight.Normal,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    // Les dossiers où le message est rangé : deux au plus, le reste en nombre.
+                    tags.take(2).forEach { LabelChip(it, Modifier.padding(start = 6.dp).widthIn(max = 110.dp)) }
+                    if (tags.size > 2) {
+                        Text("+${tags.size - 2}", modifier = Modifier.padding(start = 6.dp), style = MaterialTheme.typography.bodySmall, color = Muted)
+                    }
+                }
             }
         }
         HorizontalDivider(color = Line)

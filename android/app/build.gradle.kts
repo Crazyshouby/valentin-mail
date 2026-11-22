@@ -39,7 +39,7 @@ android {
         minSdk = 26
         targetSdk = 35
         versionCode = buildNumber
-        versionName = "0.3.$buildNumber"
+        versionName = "0.4.$buildNumber"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         firebase.forEach { (name, value) -> resValue("string", name, value) }
     }

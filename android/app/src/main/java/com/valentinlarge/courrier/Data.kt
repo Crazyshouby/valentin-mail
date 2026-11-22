@@ -22,9 +22,50 @@ data class MailItem(
     val threadId: String = id,
     /** Nombre de messages de cette conversation, tous dossiers confondus sauf la corbeille. */
     val threadCount: Int = 1,
+    /** Dossiers personnels où le message est rangé (leurs identifiants). */
+    val labels: List<String> = emptyList(),
 ) {
     val outgoing: Boolean get() = direction == "out"
+
+    /** Vrai si le message figure dans cette vue : un dossier de la boîte, ou un dossier personnel. */
+    fun isIn(view: String): Boolean {
+        val label = labelIdOf(view) ?: return folder == view
+        return folder != "trash" && label in labels
+    }
 }
+
+/** Un dossier personnel ; « Parent/Enfant » dans son nom en fait un sous-dossier. */
+data class Label(val id: String, val name: String, val total: Int = 0, val unread: Int = 0)
+
+/** Une ligne de l'arbre des dossiers : le dossier, son nom court et son niveau. */
+data class LabelNode(val label: Label, val short: String, val depth: Int)
+
+/** Range les dossiers en arbre : un sous-dossier se place sous son parent quand celui-ci existe. */
+fun labelTree(labels: List<Label>): List<LabelNode> {
+    // La barre oblique passe avant tout autre caractère : un sous-dossier suit toujours son parent.
+    val sorted = labels.sortedBy { it.name.lowercase().replace('/', '\u0001') }
+    val names = sorted.map { it.name }.toSet()
+    return sorted.map { label ->
+        val parts = label.name.split('/')
+        var depth = 0
+        var cut = 0
+        for (i in 1 until parts.size) {
+            if (parts.take(i).joinToString("/") in names) {
+                depth++
+                cut = i
+            }
+        }
+        LabelNode(label, parts.drop(cut).joinToString("/"), depth)
+    }
+}
+
+// La liste affiche soit un dossier de la boîte (« inbox », « archive »…), soit un dossier personnel,
+// désigné alors par « label: » suivi de son identifiant.
+private const val LABEL_PREFIX = "label:"
+
+fun labelKey(id: String): String = LABEL_PREFIX + id
+
+fun labelIdOf(view: String): String? = if (view.startsWith(LABEL_PREFIX)) view.substring(LABEL_PREFIX.length) else null
 
 /** Une adresse du domaine : elle reçoit du courrier tant qu'elle n'est pas coupée. */
 data class Alias(val address: String, val label: String, val enabled: Boolean, val received: Int)
@@ -32,10 +73,17 @@ data class Alias(val address: String, val label: String, val enabled: Boolean, v
 data class AliasPage(val main: String, val domain: String, val aliases: List<Alias>)
 
 /** Une règle de tri appliquée par le serveur à l'arrivée d'un message. */
-data class Rule(val id: String, val field: String, val value: String, val action: String)
+data class Rule(val id: String, val field: String, val value: String, val action: String, val target: String? = null)
 
 val RULE_FIELDS = listOf("from" to "l'expéditeur", "to" to "l'adresse de destination", "subject" to "l'objet")
-val RULE_ACTIONS = listOf("archive" to "archiver", "trash" to "mettre à la corbeille", "read" to "marquer lu", "block" to "refuser le message")
+val RULE_ACTIONS = listOf(
+    "archive" to "archiver",
+    "trash" to "mettre à la corbeille",
+    "read" to "marquer lu",
+    "block" to "refuser le message",
+    "label" to "ranger dans un dossier",
+    "file" to "ranger sans passer par la réception",
+)
 
 /** Un message commencé et gardé sur le serveur, à reprendre depuis l'appli ou le webmail. */
 data class Draft(
@@ -62,7 +110,9 @@ val FOLDERS = listOf(
     Folder("trash", "Corbeille", "La corbeille est vide."),
 )
 
-fun folderOf(id: String): Folder = FOLDERS.firstOrNull { it.id == id } ?: FOLDERS[0]
+fun folderOf(id: String): Folder =
+    FOLDERS.firstOrNull { it.id == id }
+        ?: if (labelIdOf(id) != null) Folder(id, "Dossier", "Aucun message rangé dans ce dossier.") else FOLDERS[0]
 
 /** Réglages et session, gardés dans le stockage privé de l'appli. */
 class Prefs(context: Context) {
@@ -114,17 +164,22 @@ class Prefs(context: Context) {
         get() = sp.getLong("last_seen", 0L)
         set(value) = sp.edit().putLong("last_seen", value).apply()
 
+    /** Les dossiers personnels connus à la dernière relève (identifiant, tabulation, nom), pour les revoir sans réseau. */
+    var labelsCache: String
+        get() = sp.getString("labels", "") ?: ""
+        set(value) = sp.edit().putString("labels", value).apply()
+
     var askedNotifications: Boolean
         get() = sp.getBoolean("asked_notifications", false)
         set(value) = sp.edit().putBoolean("asked_notifications", value).apply()
 
     fun clearSession() {
-        sp.edit().remove("token").remove("from").remove("address").remove("can_send").remove("signature").remove("push_server").remove("push_token").remove("addresses").remove("last_seen").apply()
+        sp.edit().remove("token").remove("from").remove("address").remove("can_send").remove("signature").remove("push_server").remove("push_token").remove("addresses").remove("last_seen").remove("labels").apply()
     }
 }
 
 /** Copie locale des listes de messages, pour la lecture hors connexion. */
-class Db(context: Context) : SQLiteOpenHelper(context, "courrier.db", null, 2) {
+class Db(context: Context) : SQLiteOpenHelper(context, "courrier.db", null, 3) {
 
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL(
@@ -140,7 +195,8 @@ class Db(context: Context) : SQLiteOpenHelper(context, "courrier.db", null, 2) {
                 size INTEGER NOT NULL,
                 is_read INTEGER NOT NULL,
                 thread_id TEXT NOT NULL,
-                thread_count INTEGER NOT NULL
+                thread_count INTEGER NOT NULL,
+                labels TEXT NOT NULL DEFAULT ''
             )"""
         )
         db.execSQL("CREATE INDEX idx_messages_folder_date ON messages (folder, date DESC)")
@@ -165,13 +221,21 @@ class Db(context: Context) : SQLiteOpenHelper(context, "courrier.db", null, 2) {
         isRead = getInt(9) != 0,
         threadId = getString(10),
         threadCount = getInt(11),
+        labels = getString(12).split(',').filter { it.isNotEmpty() },
     )
 
-    private val columns = "id, folder, direction, from_addr, from_name, to_addr, subject, date, size, is_read, thread_id, thread_count"
+    private val columns = "id, folder, direction, from_addr, from_name, to_addr, subject, date, size, is_read, thread_id, thread_count, labels"
+
+    /** Ce qui désigne une vue dans la base : un dossier de la boîte, ou un dossier personnel (hors corbeille). */
+    private fun scope(view: String): Pair<String, List<String>> {
+        val label = labelIdOf(view) ?: return "folder = ?" to listOf(view)
+        return "folder != 'trash' AND (',' || labels || ',') LIKE ?" to listOf("%,$label,%")
+    }
 
     fun list(folder: String, query: String = ""): List<MailItem> {
-        val args = mutableListOf(folder)
-        var where = "folder = ?"
+        val (scoped, scopeArgs) = scope(folder)
+        val args = scopeArgs.toMutableList()
+        var where = scoped
         val q = query.trim()
         if (q.isNotEmpty()) {
             val like = "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
@@ -209,6 +273,7 @@ class Db(context: Context) : SQLiteOpenHelper(context, "courrier.db", null, 2) {
         put("is_read", if (item.isRead) 1 else 0)
         put("thread_id", item.threadId)
         put("thread_count", item.threadCount)
+        put("labels", item.labels.joinToString(","))
     }
 
     /** Les messages d'une conversation connus de l'appareil, du plus ancien au plus récent. */
@@ -245,12 +310,24 @@ class Db(context: Context) : SQLiteOpenHelper(context, "courrier.db", null, 2) {
         try {
             val keep = items.map { it.id }.toHashSet()
             val oldest = items.minOfOrNull { it.date } ?: Long.MAX_VALUE
-            val where = if (complete) "folder = ?" else "folder = ? AND date >= ?"
-            val args = if (complete) arrayOf(folder) else arrayOf(folder, oldest.toString())
-            db.rawQuery("SELECT id FROM messages WHERE $where", args).use { c ->
-                while (c.moveToNext()) if (c.getString(0) !in keep) removed.add(c.getString(0))
+            val (scoped, scopeArgs) = scope(folder)
+            val where = if (complete) scoped else "$scoped AND date >= ?"
+            val args = (if (complete) scopeArgs else scopeArgs + oldest.toString()).toTypedArray()
+            val label = labelIdOf(folder)
+            val gone = ArrayList<Pair<String, String>>()
+            db.rawQuery("SELECT id, labels FROM messages WHERE $where", args).use { c ->
+                while (c.moveToNext()) if (c.getString(0) !in keep) gone.add(c.getString(0) to c.getString(1))
             }
-            for (id in removed) db.delete("messages", "id = ?", arrayOf(id))
+            for ((id, labels) in gone) {
+                if (label == null) {
+                    db.delete("messages", "id = ?", arrayOf(id))
+                    removed.add(id)
+                } else {
+                    // Sorti d'un dossier personnel, le message existe toujours ailleurs : on ne lui retire que ce rangement.
+                    val left = labels.split(',').filter { it.isNotEmpty() && it != label }.joinToString(",")
+                    db.update("messages", ContentValues().apply { put("labels", left) }, "id = ?", arrayOf(id))
+                }
+            }
             for (item in items) db.insertWithOnConflict("messages", null, values(item), SQLiteDatabase.CONFLICT_REPLACE)
             db.setTransactionSuccessful()
         } finally {
@@ -265,6 +342,10 @@ class Db(context: Context) : SQLiteOpenHelper(context, "courrier.db", null, 2) {
 
     fun setFolder(id: String, folder: String) {
         writableDatabase.update("messages", ContentValues().apply { put("folder", folder) }, "id = ?", arrayOf(id))
+    }
+
+    fun setLabels(id: String, labels: List<String>) {
+        writableDatabase.update("messages", ContentValues().apply { put("labels", labels.joinToString(",")) }, "id = ?", arrayOf(id))
     }
 
     fun delete(id: String) {

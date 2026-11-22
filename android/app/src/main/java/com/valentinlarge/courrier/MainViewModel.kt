@@ -123,6 +123,70 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /** La signature telle qu'elle se place dans un nouveau message, sous l'endroit où l'on écrit. */
     private fun signatureBlock(): String = if (signature.isBlank()) "" else "\n\n-- \n${signature.trim()}"
 
+    // ---- dossiers personnels
+    var labels by mutableStateOf(repo.cachedLabels())
+        private set
+    var labelBusy by mutableStateOf(false)
+        private set
+    var labelError by mutableStateOf<String?>(null)
+        private set
+
+    /** Le dossier personnel que la liste affiche, s'il y en a un. */
+    val currentLabel: Label? get() = labelIdOf(folder)?.let { id -> labels.firstOrNull { it.id == id } }
+
+    fun labelName(id: String): String? = labels.firstOrNull { it.id == id }?.name
+
+    /** Les noms des dossiers où un message est rangé. */
+    fun labelNames(ids: List<String>): List<String> = ids.mapNotNull { labelName(it) }
+
+    /** Pour une ligne de la liste : le nom court de ses dossiers, sauf celui qu'on est en train de regarder. */
+    fun tagsOf(item: MailItem): List<String> {
+        if (item.labels.isEmpty()) return emptyList()
+        val shown = labelIdOf(folder)
+        return item.labels.filter { it != shown }.mapNotNull { labelName(it)?.substringAfterLast('/') }
+    }
+
+    fun loadLabels() {
+        viewModelScope.launch {
+            try {
+                labels = repo.labels()
+            } catch (e: Exception) {
+                handle(e)
+            }
+        }
+    }
+
+    /** Applique un changement à un dossier, puis relit la liste telle que le serveur la garde. */
+    private fun labelChange(change: suspend () -> Unit) {
+        if (labelBusy) return
+        labelBusy = true
+        labelError = null
+        viewModelScope.launch {
+            try {
+                change()
+                labels = repo.labels()
+            } catch (e: Exception) {
+                labelError = handle(e)
+            }
+            labelBusy = false
+        }
+    }
+
+    fun createLabel(name: String) {
+        if (name.isBlank()) return
+        labelChange { repo.api.saveLabel(UUID.randomUUID().toString(), name.trim()) }
+    }
+
+    fun renameLabel(label: Label, name: String) {
+        if (name.isBlank() || name.trim() == label.name) return
+        labelChange { repo.api.saveLabel(label.id, name.trim()) }
+    }
+
+    fun deleteLabel(label: Label) = labelChange {
+        repo.api.deleteLabel(label.id)
+        if (labelIdOf(folder) == label.id) selectFolder("inbox")
+    }
+
     // ---- adresses et règles
     var aliasPage by mutableStateOf<AliasPage?>(null)
         private set
@@ -156,6 +220,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun openSettings() {
         screen = Screen.Settings
+        loadLabels()
         settings { }
     }
 
@@ -188,9 +253,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun forgetAlias(alias: Alias) = settings { repo.api.deleteAlias(alias.address) }
 
-    fun addRule(field: String, value: String, action: String) {
+    fun addRule(field: String, value: String, action: String, target: String? = null) {
         if (value.isBlank()) return
-        settings { repo.api.saveRule(UUID.randomUUID().toString(), field, value.trim(), action) }
+        settings { repo.api.saveRule(UUID.randomUUID().toString(), field, value.trim(), action, target) }
     }
 
     fun deleteRule(rule: Rule) = settings { repo.api.deleteRule(rule.id) }
@@ -281,6 +346,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         Push.listener = { if (screen == Screen.Mailbox && folder == "inbox") refresh() }
         showLocal()
         refresh()
+        loadLabels()
         viewModelScope.launch {
             try {
                 repo.api.me()
@@ -350,6 +416,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             repo.logout()
             Sync.cancel(app)
             messages = emptyList()
+            labels = emptyList()
             opened = null
             unread = 0
             loginError = null
@@ -416,6 +483,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         listJob?.cancel()
         val target = folder
         val text = query
+        // Les compteurs d'un dossier personnel bougent avec son contenu.
+        if (labelIdOf(target) != null) loadLabels()
         listJob = viewModelScope.launch {
             loading = true
             listError = null
@@ -490,7 +559,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun moveRows(target: List<ThreadRow>, to: String, done: String) {
         val ids = target.flatMap { it.ids }
         if (ids.isEmpty()) return
-        val origin = folder
+        // D'où vient chaque message : dans un dossier personnel, ils ne viennent pas tous du même endroit.
+        val origins = messages.filter { it.id in ids }.groupBy({ it.folder }, { it.id })
         selected.clear()
         messages = messages.filter { it.id !in ids }
         viewModelScope.launch {
@@ -499,7 +569,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 say(done) {
                     viewModelScope.launch {
                         try {
-                            repo.moveAll(ids, origin)
+                            for ((from, part) in origins) repo.moveAll(part, from)
                         } catch (e: Exception) {
                             notice = handle(e)
                         }
@@ -526,6 +596,89 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 notice = handle(e)
             }
             showLocal()
+        }
+    }
+
+    /** Range des conversations dans un dossier personnel ; ce qui était en réception la quitte. Le geste peut être annulé. */
+    fun fileRows(target: List<ThreadRow>, label: Label) {
+        val ids = target.flatMap { it.ids }
+        if (ids.isEmpty()) return
+        val fromInbox = messages.filter { it.id in ids && it.folder == "inbox" }.map { it.id }
+        val already = messages.filter { it.id in ids && label.id in it.labels }.map { it.id }.toSet()
+        selected.clear()
+        if (folder == "inbox") messages = messages.filter { it.id !in ids }
+        viewModelScope.launch {
+            try {
+                repo.file(ids, label.id)
+                say(if (ids.size == 1) "Rangé dans « ${label.name} »." else "${ids.size} messages rangés dans « ${label.name} ».") {
+                    viewModelScope.launch {
+                        try {
+                            repo.unfile(ids.filter { it !in already }, label.id)
+                            if (fromInbox.isNotEmpty()) repo.moveAll(fromInbox, "inbox")
+                        } catch (e: Exception) {
+                            notice = handle(e)
+                        }
+                        showLocal()
+                        refresh()
+                        loadLabels()
+                    }
+                }
+            } catch (e: Exception) {
+                notice = handle(e)
+            }
+            showLocal()
+            loadLabels()
+        }
+    }
+
+    /** Sort des conversations du dossier personnel affiché ; elles restent où elles sont par ailleurs. */
+    fun unfileRows(target: List<ThreadRow>) {
+        val label = currentLabel ?: return
+        val ids = target.flatMap { it.ids }
+        if (ids.isEmpty()) return
+        selected.clear()
+        messages = messages.filter { it.id !in ids }
+        viewModelScope.launch {
+            try {
+                repo.unfile(ids, label.id)
+                say(if (ids.size == 1) "Sorti de « ${label.name} »." else "${ids.size} messages sortis de « ${label.name} ».") {
+                    viewModelScope.launch {
+                        try {
+                            repo.file(ids, label.id, leaveInbox = false)
+                        } catch (e: Exception) {
+                            notice = handle(e)
+                        }
+                        showLocal()
+                        refresh()
+                    }
+                }
+            } catch (e: Exception) {
+                notice = handle(e)
+            }
+            showLocal()
+            loadLabels()
+        }
+    }
+
+    /** Dans la lecture : range le message ouvert dans un dossier, ou l'en sort s'il y est déjà. */
+    fun toggleLabel(label: Label) {
+        val current = opened ?: return
+        val item = current.item
+        val filed = label.id in item.labels
+        viewModelScope.launch {
+            try {
+                if (filed) repo.unfile(listOf(item.id), label.id) else repo.file(listOf(item.id), label.id)
+                val fresh = if (filed) {
+                    item.copy(labels = item.labels - label.id)
+                } else {
+                    item.copy(labels = item.labels + label.id, folder = if (item.folder == "inbox") "archive" else item.folder)
+                }
+                if (opened?.item?.id == item.id) opened = current.copy(item = fresh)
+                notice = if (filed) "Sorti de « ${label.name} »." else "Rangé dans « ${label.name} »."
+                loadLabels()
+            } catch (e: Exception) {
+                notice = handle(e)
+            }
         }
     }
 
