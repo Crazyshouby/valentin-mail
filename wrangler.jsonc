@@ -22,10 +22,9 @@
   // Adresse d'expédition, telle que tes correspondants la verront.
   "vars": { "MAIL_FROM": "Valentin <valentin@valentinlarge.com>" },
 
-  // La règle de réception (quelles adresses arrivent dans la boîte) se règle dans le
-  // tableau de bord Cloudflare : Email Routing > Routing Rules > Catch-all > Send to a Worker.
-  // Avec Wrangler sur un ordinateur, on peut la gérer ici à la place :
-  // "addresses": ["*@valentinlarge.com"],
+  // Règle « Catch-all » d'Email Routing : toute adresse du domaine arrive dans la boîte.
+  // Le serveur liste ensuite ces adresses, et l'appli permet de couper celles qui attirent le spam.
+  "addresses": ["*@valentinlarge.com"],
 
   // Pour ouvrir le webmail sur ton domaine plutôt que sur l'adresse *.workers.dev,
   // retire les deux barres devant la ligne suivante :
