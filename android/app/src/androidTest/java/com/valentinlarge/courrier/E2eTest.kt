@@ -379,6 +379,8 @@ class E2eTest {
         waitText("La corbeille est vide")
 
         // ---- adresses et règles : une nouvelle adresse, une règle qui archive à l'arrivée
+        // Le message de confirmation précédent s'affiche en bas de l'écran, là où se trouvent les boutons à venir.
+        settle()
         rule.onNodeWithText("Réception").performClick()
         menu("Adresses et règles")
         waitText("Tes adresses")
