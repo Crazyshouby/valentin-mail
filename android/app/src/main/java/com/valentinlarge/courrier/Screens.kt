@@ -275,7 +275,7 @@ fun MailboxScreen(vm: MainViewModel, snackbar: SnackbarHostState) {
                     OutlinedTextField(
                         value = vm.query,
                         onValueChange = { vm.search(it) },
-                        placeholder = { Text("Chercher un expéditeur ou un objet") },
+                        placeholder = { Text("Chercher dans les messages") },
                         singleLine = true,
                         trailingIcon = {
                             if (vm.query.isNotEmpty()) {

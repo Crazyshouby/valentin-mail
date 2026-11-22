@@ -382,6 +382,20 @@ class E2eTest {
         // Le message de confirmation précédent s'affiche en bas de l'écran, là où se trouvent les boutons à venir.
         settle()
         rule.onNodeWithText("Réception").performClick()
+        waitText("Votre commande est partie")
+
+        // ---- recherche : un mot qui ne figure que dans le texte d'un message
+        rule.onNodeWithContentDescription("Chercher dans ce dossier").performClick()
+        rule.onNodeWithTag("recherche").performTextInput("festival")
+        rule.waitUntil(30_000) {
+            vm.messages.isNotEmpty() && vm.messages.any { it.subject.startsWith("Devis pour") } &&
+                vm.messages.none { it.subject.startsWith("Votre commande") }
+        }
+        shell("input keyevent 111")
+        shot("16b-recherche-dans-le-texte")
+        rule.onNodeWithContentDescription("Chercher dans ce dossier").performClick()
+        rule.waitUntil(30_000) { vm.query.isEmpty() && vm.messages.any { it.subject.startsWith("Votre commande") } }
+
         menu("Adresses et règles")
         waitText("Tes adresses")
         waitText("adresse principale")
@@ -395,6 +409,10 @@ class E2eTest {
         waitText("contient « infolettre »")
         rule.waitUntil(30_000) { !vm.settingsBusy }
         shot("17-adresses-et-regles")
+        rule.onNodeWithTag("signature").performScrollTo().performTextInput("Valentin, essai")
+        rule.onNodeWithText("Enregistrer la signature").performScrollTo().performClick()
+        rule.waitUntil(30_000) { vm.signature == "Valentin, essai" && !vm.settingsBusy }
+        settle()
         rule.onNodeWithContentDescription("Retour à la boîte").performClick()
         waitText("Réception")
         deliver("Infolettre du lundi <news@infolettre.example>", "Numero 7")
@@ -413,6 +431,7 @@ class E2eTest {
         rule.onNodeWithText("Répondre").performClick()
         waitText("Réponse")
         assertEquals("contact@valentinlarge.com", vm.draftFrom)
+        assertTrue("la signature se place avant le message cité", vm.draftText.startsWith("\n\n-- \nValentin, essai\n\nLe "))
         waitText("Valentin <contact@valentinlarge.com>")
         rule.onNodeWithTag("message").performTextInput("Bien reçu, je prépare le devis.")
         shell("input keyevent 111")

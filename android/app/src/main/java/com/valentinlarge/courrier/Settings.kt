@@ -221,6 +221,24 @@ fun SettingsScreen(vm: MainViewModel, snackbar: SnackbarHostState) {
                 }
             }
 
+            // --------------------------------------------------- signature
+            SectionTitle("Signature", "Ajoutée au bas des messages que tu écris, sous l'endroit où tu tapes. Tu peux la retirer d'un message avant l'envoi.")
+            Column(Modifier.fillMaxWidth().background(Color.White).padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                var text by rememberSaveable(vm.signature) { mutableStateOf(vm.signature) }
+                OutlinedTextField(
+                    value = text,
+                    onValueChange = { text = it },
+                    placeholder = { Text("Ton nom, ton métier, un numéro…") },
+                    minLines = 3,
+                    keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
+                    modifier = Modifier.fillMaxWidth().testTag("signature"),
+                )
+                Button(
+                    onClick = { vm.saveSignature(text) },
+                    enabled = text.trim() != vm.signature && !vm.settingsBusy,
+                ) { Text("Enregistrer la signature") }
+            }
+
             // ----------------------------------------------- notifications
             SectionTitle(
                 "Notifications",

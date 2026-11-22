@@ -108,7 +108,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         canSend = repo.prefs.canSend
         addresses = repo.prefs.addresses
         pushServer = repo.prefs.pushServer
+        signature = repo.prefs.signature
     }
+
+    /** Texte ajouté au bas des messages qu'on écrit. */
+    var signature by mutableStateOf(repo.prefs.signature)
+        private set
+
+    fun saveSignature(text: String) = settings {
+        repo.api.saveSignature(text)
+        notice = "Signature enregistrée."
+    }
+
+    /** La signature telle qu'elle se place dans un nouveau message, sous l'endroit où l'on écrit. */
+    private fun signatureBlock(): String = if (signature.isBlank()) "" else "\n\n-- \n${signature.trim()}"
 
     // ---- adresses et règles
     var aliasPage by mutableStateOf<AliasPage?>(null)
@@ -348,7 +361,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun showLocal() {
         viewModelScope.launch {
-            messages = repo.local(folder, query)
+            // Pendant une recherche, la liste vient du serveur (il cherche aussi dans le texte) :
+            // on en rafraîchit seulement l'état, sans la refiltrer sur l'appareil.
+            messages = if (query.isBlank()) repo.local(folder, query) else repo.known(messages.map { it.id }, folder)
             unread = repo.unread()
         }
     }
@@ -410,7 +425,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     hasMore = page.hasMore
                     unread = page.unread
                     offline = false
-                    messages = repo.local(target, text)
+                    messages = if (text.isBlank()) repo.local(target, text) else page.messages
                 }
                 loading = false
                 if (target == "inbox" && text.isBlank()) repo.prefetch(page.messages)
@@ -440,7 +455,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val page = repo.more(target, text, last.date)
                 if (target == folder && text == query) {
                     hasMore = page.hasMore
-                    messages = repo.local(target, text)
+                    messages = if (text.isBlank()) repo.local(target, text) else (messages + page.messages).distinctBy { it.id }
                 }
             } catch (e: Exception) {
                 notice = handle(e)
@@ -708,7 +723,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun compose() {
         // Un texte resté là faute de réseau pour l'enregistrer est proposé à nouveau.
         val leftover = hasContent()
-        if (!leftover) clearDraft()
+        if (!leftover) {
+            clearDraft()
+            draftText = signatureBlock()
+        }
         showComposer()
         if (leftover) baseline = ""
     }
@@ -717,6 +735,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun composeTo(address: String) {
         clearDraft()
         draftTo = address.trim()
+        draftText = signatureBlock()
         showComposer()
         baseline = ""
     }
@@ -763,7 +782,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val received = current.item.toAddr.trim().lowercase()
         if (received != address.lowercase() && received in addresses) draftFrom = received
         draftSubject = if (Regex("^\\s*re\\s*:", RegexOption.IGNORE_CASE).containsMatchIn(subject)) subject else "Re: $subject"
-        draftText = quote(current)
+        draftText = signatureBlock() + quote(current)
         draftReplyTo = current.item.id
         showComposer()
     }
@@ -777,6 +796,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val source = mail.text?.takeIf { it.isNotBlank() } ?: mail.html?.let { Mime.htmlToText(it) }.orEmpty()
         draftSubject = if (Regex("^\\s*(fwd?|tr)\\s*:", RegexOption.IGNORE_CASE).containsMatchIn(subject)) subject else "Fwd: $subject"
         draftText = buildString {
+            append(signatureBlock())
             append("\n\n---------- Message transféré ----------\n")
             append("De : ").append(mail.from.joinToString(", ") { it.label }.ifBlank { current.item.fromAddr }).append('\n')
             append("Date : ").append(longDate(mail.date ?: current.item.date)).append('\n')

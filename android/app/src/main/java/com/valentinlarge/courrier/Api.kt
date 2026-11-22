@@ -149,6 +149,7 @@ class Api(private val prefs: Prefs) {
         prefs.address = me.optString("address")
         prefs.canSend = me.optBoolean("canSend")
         prefs.pushServer = me.optBoolean("push")
+        prefs.signature = me.optString("signature")
         val list = me.optJSONArray("addresses") ?: JSONArray()
         prefs.addresses = (0 until list.length()).map { list.optString(it) }.filter { it.isNotBlank() }
     }
@@ -157,6 +158,11 @@ class Api(private val prefs: Prefs) {
     suspend fun testPush(): Pair<Boolean, String> = withContext(Dispatchers.IO) {
         val result = json(request("/api/push/test").post("{}".toRequestBody(jsonType)).build())
         if (result.optBoolean("ok")) true to result.optInt("sent").toString() else false to result.optString("error")
+    }
+
+    suspend fun saveSignature(text: String) = withContext(Dispatchers.IO) {
+        val body = JSONObject().put("signature", text).toString().toRequestBody(jsonType)
+        prefs.signature = json(request("/api/settings").put(body).build()).optString("signature")
     }
 
     suspend fun registerDevice(token: String) = withContext(Dispatchers.IO) {

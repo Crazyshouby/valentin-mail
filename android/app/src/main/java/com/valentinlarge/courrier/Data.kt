@@ -89,6 +89,11 @@ class Prefs(context: Context) {
         get() = sp.getBoolean("can_send", false)
         set(value) = sp.edit().putBoolean("can_send", value).apply()
 
+    /** Texte ajouté au bas des messages qu'on écrit ; gardé sur le serveur, donc commun au webmail. */
+    var signature: String
+        get() = sp.getString("signature", "") ?: ""
+        set(value) = sp.edit().putString("signature", value).apply()
+
     /** Vrai si le serveur sait envoyer les notifications instantanées. */
     var pushServer: Boolean
         get() = sp.getBoolean("push_server", false)
@@ -114,7 +119,7 @@ class Prefs(context: Context) {
         set(value) = sp.edit().putBoolean("asked_notifications", value).apply()
 
     fun clearSession() {
-        sp.edit().remove("token").remove("from").remove("address").remove("can_send").remove("push_server").remove("push_token").remove("addresses").remove("last_seen").apply()
+        sp.edit().remove("token").remove("from").remove("address").remove("can_send").remove("signature").remove("push_server").remove("push_token").remove("addresses").remove("last_seen").apply()
     }
 }
 

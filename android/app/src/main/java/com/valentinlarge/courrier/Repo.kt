@@ -39,6 +39,10 @@ class Repo private constructor(context: Context) {
 
     suspend fun unread(): Int = withContext(Dispatchers.IO) { db.unreadCount() }
 
+    /** L'état actuel de messages déjà affichés (résultats d'une recherche), dans le même ordre. */
+    suspend fun known(ids: List<String>, folder: String): List<MailItem> =
+        withContext(Dispatchers.IO) { ids.mapNotNull { db.get(it) }.filter { it.folder == folder } }
+
     /** Première page d'un dossier : met la copie locale à jour, et prépare la lecture hors connexion. */
     suspend fun refresh(folder: String, query: String): ListPage {
         val page = api.list(folder, query)
