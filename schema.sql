@@ -70,3 +70,16 @@ CREATE TABLE IF NOT EXISTS rules (
   action  TEXT NOT NULL,   -- archive | trash | read | block
   created INTEGER NOT NULL
 );
+
+-- Téléphones à prévenir à l'arrivée d'un message (jetons Firebase Cloud Messaging).
+CREATE TABLE IF NOT EXISTS devices (
+  token   TEXT PRIMARY KEY,
+  created INTEGER NOT NULL
+);
+
+-- Petites valeurs gardées un temps, comme le jeton d'accès Google (une heure).
+CREATE TABLE IF NOT EXISTS cache (
+  key     TEXT PRIMARY KEY,
+  value   TEXT NOT NULL,
+  expires INTEGER NOT NULL
+);
