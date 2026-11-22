@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Copier le contenu d'un fichier</title>
+<style>
+  :root { --paper: #f1f4f9; --ink: #17223b; --muted: #5a6880; --line: #d8dfea; --blue: #1d57b8; --blue-wash: #e4ecfa; --red: #cf2f3c; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--paper); color: var(--ink); font: 17px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 34rem; margin: 0 auto; padding: 2rem 1.25rem 3rem; }
+  h1 { font-size: 1.6rem; line-height: 1.2; letter-spacing: -0.02em; margin: 0 0 0.5rem; }
+  p { margin: 0 0 1rem; }
+  .muted { color: var(--muted); font-size: 0.95rem; }
+  .card { background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 1.25rem; margin: 1.5rem 0; }
+  label { display: block; font-weight: 600; margin-bottom: 0.5rem; }
+  input[type="file"] { width: 100%; font: inherit; }
+  button { font: inherit; font-weight: 600; color: #fff; background: var(--blue); border: 0; border-radius: 999px; padding: 0.8rem 1.4rem; margin-top: 1rem; width: 100%; }
+  button:disabled { background: var(--line); color: var(--muted); }
+  button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 3px solid var(--ink); outline-offset: 2px; }
+  #etat { margin: 1rem 0 0; padding: 0.75rem 1rem; background: var(--blue-wash); border-radius: 8px; }
+  #etat.erreur { background: #fbe9eb; color: var(--red); }
+  #etat:empty { display: none; }
+  textarea { width: 100%; min-height: 9rem; margin-top: 1rem; font: 0.8rem/1.4 ui-monospace, monospace; border: 1px solid var(--line); border-radius: 8px; padding: 0.5rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Copier le contenu d'un fichier</h1>
+  <p>Pour coller une clé dans un réglage quand le téléphone refuse d'ouvrir le fichier.</p>
+  <p class="muted">Le fichier est lu par ton navigateur, sur cet appareil. Rien n'est envoyé, ni à ce site ni ailleurs.</p>
+
+  <div class="card">
+    <label for="fichier">Le fichier à copier</label>
+    <input id="fichier" type="file" accept=".json,.txt,application/json,text/plain">
+    <button id="copier" type="button" disabled>Copier le contenu</button>
+    <p id="etat" role="status"></p>
+    <textarea id="texte" hidden readonly aria-label="Contenu du fichier, à copier à la main"></textarea>
+  </div>
+
+  <p class="muted">Une fois la clé collée à sa place, copie n'importe quel autre texte pour qu'elle ne reste pas dans le presse-papiers.</p>
+</main>
+<script src="/copier.js"></script>
+</body>
+</html>

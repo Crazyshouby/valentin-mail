@@ -183,8 +183,8 @@ async function googleAccessToken(env, account) {
 
 // Prévient chaque téléphone déclaré qu'un message est arrivé. Le signal ne contient rien du
 // message : l'appli vient ensuite le chercher elle-même sur ce serveur.
-async function pushNewMail(env) {
-  if (!env.FCM_SERVICE_ACCOUNT) return { sent: 0 };
+async function pushNewMail(env, type = "new-mail") {
+  if (!env.FCM_SERVICE_ACCOUNT) return { sent: 0, devices: 0, refused: [] };
   let account;
   try {
     account = JSON.parse(env.FCM_SERVICE_ACCOUNT);
@@ -193,28 +193,54 @@ async function pushNewMail(env) {
   }
   const devices = await env.DB.prepare(`SELECT token FROM devices ORDER BY created DESC LIMIT ${MAX_DEVICES}`).all();
   const tokens = (devices.results || []).map((d) => d.token);
-  if (!tokens.length) return { sent: 0 };
+  if (!tokens.length) return { sent: 0, devices: 0, refused: [] };
 
   const access = await googleAccessToken(env, account);
   const url = `${env.FCM_API_URL || FCM_URL}/v1/projects/${account.project_id}/messages:send`;
   let sent = 0;
+  const refused = [];
   for (const token of tokens) {
     const response = await fetch(url, {
       method: "POST",
       headers: { Authorization: `Bearer ${access}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ message: { token, android: { priority: "HIGH" }, data: { type: "new-mail" } } }),
+      body: JSON.stringify({ message: { token, android: { priority: "HIGH" }, data: { type } } }),
     });
     if (response.ok) {
       sent++;
-    } else if (response.status === 404) {
+      continue;
+    }
+    let reason = "";
+    try {
+      const data = await response.json();
+      reason = data && data.error ? String(data.error.status || data.error.message || "") : "";
+    } catch {
+      /* réponse non JSON */
+    }
+    refused.push(`${response.status}${reason ? " " + reason : ""}`);
+    if (response.status === 404) {
       // L'appli a été désinstallée ou son jeton a changé : ce téléphone n'est plus à prévenir.
       await env.DB.prepare("DELETE FROM devices WHERE token = ?1").bind(token).run();
     } else {
       if (response.status === 401) await env.DB.prepare("DELETE FROM cache WHERE key = 'fcm_token'").run();
-      console.error("Notification refusée :", response.status, (await response.text()).slice(0, 300));
+      console.error("Notification refusée :", response.status, reason);
     }
   }
-  return { sent };
+  return { sent, devices: tokens.length, refused };
+}
+
+// Essai demandé depuis l'appli : envoie un signal d'essai et dit ce que Google a répondu.
+async function testPush(env) {
+  if (!env.FCM_SERVICE_ACCOUNT) {
+    return json({ ok: false, error: "Le serveur n'a pas la clé Firebase (secret FCM_SERVICE_ACCOUNT)." });
+  }
+  try {
+    const result = await pushNewMail(env, "test");
+    if (!result.devices) return json({ ok: false, error: "Aucun téléphone n'est déclaré auprès du serveur." });
+    if (!result.sent) return json({ ok: false, error: `Google a refusé le signal (${result.refused.join(", ")}).` });
+    return json({ ok: true, sent: result.sent, devices: result.devices });
+  } catch (err) {
+    return json({ ok: false, error: String((err && err.message) || err) });
+  }
 }
 
 async function saveDevice(request, env, remove) {
@@ -399,6 +425,7 @@ async function route(request, env) {
   if (path === "/api/trash/empty" && method === "POST") return emptyTrash(env);
   if (path === "/api/messages/batch" && method === "POST") return batchMessages(request, env);
   if (path === "/api/drafts" && method === "GET") return listDrafts(env);
+  if (path === "/api/push/test" && method === "POST") return testPush(env);
   if (path === "/api/devices" && (method === "PUT" || method === "DELETE")) return saveDevice(request, env, method === "DELETE");
   if (path === "/api/aliases" && method === "GET") return listAliases(env);
   if (path === "/api/rules" && method === "GET") return listRules(env);
