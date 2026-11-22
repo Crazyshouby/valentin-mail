@@ -1,0 +1,31 @@
+From: "Atelier Papier" <bonjour@atelier-papier.example>
+To: valentin@valentinlarge.com
+Reply-To: commandes@atelier-papier.example
+Subject: Votre commande est partie
+Date: Sat, 21 Nov 2026 08:12:00 -0500
+Message-ID: <cmd-778@atelier-papier.example>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="MIX"
+
+--MIX
+Content-Type: multipart/related; boundary="REL"
+
+--REL
+Content-Type: text/html; charset=UTF-8
+
+<html><head><style>h1{color:#1d57b8}</style><meta http-equiv="refresh" content="0;url=https://evil.example/"></head><body><h1>Merci pour votre commande</h1><p>Votre colis <b>n° 778</b> est en route.</p><p><img src="cid:logo123" alt="logo" width="40" height="40"> <img src="https://tracker.example/pixel.gif" alt="pixel"></p><script>parent.document.title="PIRATE"</script><p onclick="alert(1)"><a href="https://atelier-papier.example/suivi">Suivre le colis</a></p></body></html>
+--REL
+Content-Type: image/png
+Content-ID: <logo123>
+Content-Disposition: inline; filename="logo.png"
+Content-Transfer-Encoding: base64
+
+iVBORw0KGgoAAAANSUhEUgAAAAoAAAAKCAYAAACNMs+9AAAAFUlEQVR42mP8z8BQz0AEYBxVSF+FABJADveWkH6oAAAAAElFTkSuQmCC
+--REL--
+--MIX
+Content-Type: text/plain; charset=UTF-8; name="facture.txt"
+Content-Disposition: attachment; filename="facture.txt"
+Content-Transfer-Encoding: base64
+
+RmFjdHVyZSA3NzggOiA0MiwwMCBFVVI=
+--MIX--
