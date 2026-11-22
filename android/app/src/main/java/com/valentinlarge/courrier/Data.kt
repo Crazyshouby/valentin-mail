@@ -26,6 +26,17 @@ data class MailItem(
     val outgoing: Boolean get() = direction == "out"
 }
 
+/** Une adresse du domaine : elle reçoit du courrier tant qu'elle n'est pas coupée. */
+data class Alias(val address: String, val label: String, val enabled: Boolean, val received: Int)
+
+data class AliasPage(val main: String, val domain: String, val aliases: List<Alias>)
+
+/** Une règle de tri appliquée par le serveur à l'arrivée d'un message. */
+data class Rule(val id: String, val field: String, val value: String, val action: String)
+
+val RULE_FIELDS = listOf("from" to "l'expéditeur", "to" to "l'adresse de destination", "subject" to "l'objet")
+val RULE_ACTIONS = listOf("archive" to "archiver", "trash" to "mettre à la corbeille", "read" to "marquer lu", "block" to "refuser le message")
+
 /** Un message commencé et gardé sur le serveur, à reprendre depuis l'appli ou le webmail. */
 data class Draft(
     val id: String,
@@ -78,6 +89,11 @@ class Prefs(context: Context) {
         get() = sp.getBoolean("can_send", false)
         set(value) = sp.edit().putBoolean("can_send", value).apply()
 
+    /** Les adresses depuis lesquelles on peut écrire, la principale en premier. */
+    var addresses: List<String>
+        get() = (sp.getString("addresses", "") ?: "").split('\n').filter { it.isNotBlank() }
+        set(value) = sp.edit().putString("addresses", value.joinToString("\n")).apply()
+
     /** Date du message le plus récent déjà vu : sert à ne notifier que les nouveautés. */
     var lastSeen: Long
         get() = sp.getLong("last_seen", 0L)
@@ -88,7 +104,7 @@ class Prefs(context: Context) {
         set(value) = sp.edit().putBoolean("asked_notifications", value).apply()
 
     fun clearSession() {
-        sp.edit().remove("token").remove("from").remove("address").remove("can_send").remove("last_seen").apply()
+        sp.edit().remove("token").remove("from").remove("address").remove("can_send").remove("addresses").remove("last_seen").apply()
     }
 }
 

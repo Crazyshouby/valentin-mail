@@ -27,6 +27,7 @@ sealed interface Screen {
     data object Mailbox : Screen
     data class Reader(val id: String) : Screen
     data object Compose : Screen
+    data object Settings : Screen
 }
 
 /** Un fichier choisi pour être joint au message en cours de rédaction. */
@@ -92,11 +93,67 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     var canSend by mutableStateOf(repo.prefs.canSend)
         private set
 
+    /** Les adresses depuis lesquelles on peut écrire, la principale en premier. */
+    var addresses by mutableStateOf(repo.prefs.addresses)
+        private set
+
     private fun showAccount() {
         address = repo.prefs.address
         from = repo.prefs.from
         canSend = repo.prefs.canSend
+        addresses = repo.prefs.addresses
     }
+
+    // ---- adresses et règles
+    var aliasPage by mutableStateOf<AliasPage?>(null)
+        private set
+    var rules by mutableStateOf<List<Rule>>(emptyList())
+        private set
+    var settingsError by mutableStateOf<String?>(null)
+        private set
+    var settingsBusy by mutableStateOf(false)
+        private set
+
+    fun openSettings() {
+        screen = Screen.Settings
+        settings { }
+    }
+
+    /** Applique un changement, puis relit les adresses et les règles telles que le serveur les garde. */
+    private fun settings(change: suspend () -> Unit) {
+        settingsBusy = true
+        settingsError = null
+        viewModelScope.launch {
+            try {
+                change()
+                aliasPage = repo.api.aliases()
+                rules = repo.api.rules()
+                repo.api.me()
+                showAccount()
+            } catch (e: Exception) {
+                settingsError = handle(e)
+            }
+            settingsBusy = false
+        }
+    }
+
+    fun addAlias(name: String, label: String) {
+        val typed = name.trim().lowercase()
+        if (typed.isEmpty()) return
+        val domain = aliasPage?.domain?.ifBlank { null } ?: address.substringAfter('@')
+        settings { repo.api.saveAlias(if ('@' in typed) typed else "$typed@$domain", label = label.trim(), enabled = true) }
+    }
+
+    fun setAliasEnabled(alias: Alias, enabled: Boolean) = settings { repo.api.saveAlias(alias.address, enabled = enabled) }
+
+    fun forgetAlias(alias: Alias) = settings { repo.api.deleteAlias(alias.address) }
+
+    fun addRule(field: String, value: String, action: String) {
+        if (value.isBlank()) return
+        settings { repo.api.saveRule(UUID.randomUUID().toString(), field, value.trim(), action) }
+    }
+
+    fun deleteRule(rule: Rule) = settings { repo.api.deleteRule(rule.id) }
 
     // ---- connexion
     var loginBusy by mutableStateOf(false)
@@ -156,6 +213,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     var draftCc by mutableStateOf("")
     var draftSubject by mutableStateOf("")
     var draftText by mutableStateOf("")
+
+    /** Adresse d'expédition choisie ; vide pour l'adresse principale. */
+    var draftFrom by mutableStateOf("")
     val draftFiles = mutableStateListOf<DraftFile>()
     var draftReplyTo by mutableStateOf<String?>(null)
         private set
@@ -536,6 +596,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 showLocal()
             }
             Screen.Compose -> closeComposer()
+            Screen.Settings -> screen = Screen.Mailbox
             else -> Unit
         }
     }
@@ -598,7 +659,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     /** Photographie du message en cours, pour savoir s'il a changé depuis son ouverture. */
     private fun snapshot(): String =
-        listOf(draftTo, draftCc, draftSubject, draftText, draftFiles.joinToString("|") { it.uploadId ?: it.uri.toString() })
+        listOf(draftFrom, draftTo, draftCc, draftSubject, draftText, draftFiles.joinToString("|") { it.uploadId ?: it.uri.toString() })
             .joinToString("\u0001")
 
     private fun showComposer(from: Screen = screen) {
@@ -662,6 +723,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val subject = current.mail.subject.ifBlank { current.item.subject }
         draftTo = replyTarget(current)
         if (all) draftCc = othersOf(current).joinToString(", ")
+        // On répond depuis l'adresse qui a reçu le message, si c'est l'une des nôtres.
+        val received = current.item.toAddr.trim().lowercase()
+        if (received != address.lowercase() && received in addresses) draftFrom = received
         draftSubject = if (Regex("^\\s*re\\s*:", RegexOption.IGNORE_CASE).containsMatchIn(subject)) subject else "Re: $subject"
         draftText = quote(current)
         draftReplyTo = current.item.id
@@ -761,6 +825,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         draftCc = ""
         draftSubject = ""
         draftText = ""
+        draftFrom = ""
         draftFiles.clear()
         draftReplyTo = null
         draftId = null
@@ -829,7 +894,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             try {
                 val ids = uploadPending()
-                val stored = repo.api.send(draftTo, draftCc, draftSubject, draftText, draftReplyTo, ids, draftId)
+                val stored = repo.api.send(draftTo, draftCc, draftSubject, draftText, draftReplyTo, ids, draftId, draftFrom.ifBlank { null })
                 clearDraft()
                 notice = if (stored) "Message envoyé." else "Message envoyé, mais sa copie n'a pas pu être rangée dans Envoyés."
                 screen = composeReturn

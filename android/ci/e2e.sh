@@ -84,6 +84,11 @@ if grep -q "^OK (" "$OUT/instrument.log" && ! grep -q "FAILURES" "$OUT/instrumen
     const draft = lines.find((l) => l.body.subject === "Idée à creuser");
     if (!draft || !String(draft.body.to).includes("plus-tard@example.com")) throw new Error("le brouillon repris est resté sur place");
     console.log("Transfert et brouillon vérifiés.");
+    const other = lines.find((l) => /^Re: Demande de devis/.test(l.body.subject || ""));
+    if (!other || other.body.from !== "Valentin <contact@valentinlarge.com>") {
+      throw new Error("la réponse devait partir de contact@ : " + JSON.stringify(other && other.body.from));
+    }
+    console.log("Envoi depuis une autre adresse vérifié.");
   ' "$OUT/resend.log" && status=0
 else
   echo "Le parcours dans l'appli a échoué."

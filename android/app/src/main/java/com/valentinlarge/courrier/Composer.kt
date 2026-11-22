@@ -3,6 +3,8 @@ package com.valentinlarge.courrier
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.Row
@@ -22,6 +24,8 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -117,10 +121,42 @@ fun ComposeScreen(vm: MainViewModel, snackbar: SnackbarHostState) {
             }
 
             if (vm.from.isNotBlank()) {
-                Row(Modifier.fillMaxWidth().heightIn(min = 56.dp).padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text("De", modifier = Modifier.width(56.dp), color = Muted)
-                    // Même retrait que le texte saisi dans les lignes suivantes.
-                    Text(vm.from, modifier = Modifier.padding(start = 16.dp), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                // Avec plusieurs adresses, la ligne « De » se touche pour en choisir une autre.
+                var choosing by remember { mutableStateOf(false) }
+                val several = vm.addresses.size > 1
+                val name = vm.from.substringBefore('<').trim()
+                val chosen = vm.draftFrom.ifBlank { vm.address }
+                Box {
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 56.dp)
+                            .clickable(enabled = several && !vm.sending) { choosing = true }
+                            .padding(horizontal = 16.dp)
+                            .testTag("expediteur"),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text("De", modifier = Modifier.width(56.dp), color = Muted)
+                        // Même retrait que le texte saisi dans les lignes suivantes.
+                        Text(
+                            if (name.isNotBlank()) "$name <$chosen>" else chosen,
+                            modifier = Modifier.weight(1f).padding(start = 16.dp),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        if (several) Text("Changer", color = Blue, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold)
+                    }
+                    DropdownMenu(expanded = choosing, onDismissRequest = { choosing = false }) {
+                        vm.addresses.forEach { address ->
+                            DropdownMenuItem(
+                                text = { Text(address, fontWeight = if (address == chosen) FontWeight.Bold else FontWeight.Normal) },
+                                onClick = {
+                                    choosing = false
+                                    vm.draftFrom = if (address == vm.address) "" else address
+                                },
+                            )
+                        }
+                    }
                 }
                 HorizontalDivider(color = Line)
             }

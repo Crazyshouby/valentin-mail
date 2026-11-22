@@ -70,7 +70,7 @@ fun App(vm: MainViewModel) {
 
     val screen = vm.screen
     val selecting = screen == Screen.Mailbox && vm.selected.isNotEmpty()
-    BackHandler(enabled = screen is Screen.Reader || screen == Screen.Compose || selecting) {
+    BackHandler(enabled = screen is Screen.Reader || screen == Screen.Compose || screen == Screen.Settings || selecting) {
         if (selecting) vm.clearSelection() else vm.back()
     }
 
@@ -80,6 +80,7 @@ fun App(vm: MainViewModel) {
             Screen.Mailbox -> MailboxScreen(vm, snackbar)
             is Screen.Reader -> ReaderScreen(vm, snackbar)
             Screen.Compose -> ComposeScreen(vm, snackbar)
+            Screen.Settings -> SettingsScreen(vm, snackbar)
         }
     }
 }

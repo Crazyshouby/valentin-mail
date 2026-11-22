@@ -148,6 +148,53 @@ class Api(private val prefs: Prefs) {
         prefs.from = me.optString("from")
         prefs.address = me.optString("address")
         prefs.canSend = me.optBoolean("canSend")
+        val list = me.optJSONArray("addresses") ?: JSONArray()
+        prefs.addresses = (0 until list.length()).map { list.optString(it) }.filter { it.isNotBlank() }
+    }
+
+    suspend fun aliases(): AliasPage = withContext(Dispatchers.IO) {
+        val result = json(request("/api/aliases").get().build())
+        val array = result.optJSONArray("aliases") ?: JSONArray()
+        AliasPage(
+            main = result.optString("main"),
+            domain = result.optString("domain"),
+            aliases = (0 until array.length()).map { i ->
+                val o = array.getJSONObject(i)
+                Alias(o.getString("address"), o.optString("label"), o.optBoolean("enabled", true), o.optInt("received"))
+            },
+        )
+    }
+
+    suspend fun saveAlias(address: String, label: String? = null, enabled: Boolean? = null) = withContext(Dispatchers.IO) {
+        val body = JSONObject()
+        if (label != null) body.put("label", label)
+        if (enabled != null) body.put("enabled", enabled)
+        json(request("/api/aliases/$address").put(body.toString().toRequestBody(jsonType)).build())
+        Unit
+    }
+
+    suspend fun deleteAlias(address: String) = withContext(Dispatchers.IO) {
+        json(request("/api/aliases/$address").delete().build())
+        Unit
+    }
+
+    suspend fun rules(): List<Rule> = withContext(Dispatchers.IO) {
+        val array = json(request("/api/rules").get().build()).optJSONArray("rules") ?: JSONArray()
+        (0 until array.length()).map { i ->
+            val o = array.getJSONObject(i)
+            Rule(o.getString("id"), o.optString("field"), o.optString("value"), o.optString("action"))
+        }
+    }
+
+    suspend fun saveRule(id: String, field: String, value: String, action: String) = withContext(Dispatchers.IO) {
+        val body = JSONObject().put("field", field).put("value", value).put("action", action)
+        json(request("/api/rules/$id").put(body.toString().toRequestBody(jsonType)).build())
+        Unit
+    }
+
+    suspend fun deleteRule(id: String) = withContext(Dispatchers.IO) {
+        json(request("/api/rules/$id").delete().build())
+        Unit
     }
 
     suspend fun list(folder: String, query: String = "", before: Long = 0, after: Long = 0): ListPage =
@@ -284,6 +331,7 @@ class Api(private val prefs: Prefs) {
         replyToId: String?,
         attachmentIds: List<String>,
         draftId: String? = null,
+        from: String? = null,
     ): Boolean = withContext(Dispatchers.IO) {
         val body = JSONObject()
             .put("to", to)
@@ -293,6 +341,7 @@ class Api(private val prefs: Prefs) {
         if (replyToId != null) body.put("reply_to_id", replyToId)
         if (attachmentIds.isNotEmpty()) body.put("attachment_ids", JSONArray(attachmentIds))
         if (draftId != null) body.put("draft_id", draftId)
+        if (from != null) body.put("from", from)
         json(request("/api/send").post(body.toString().toRequestBody(jsonType)).build()).optBoolean("stored", true)
     }
 }

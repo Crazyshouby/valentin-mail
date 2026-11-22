@@ -75,7 +75,13 @@ class E2eTest {
     }
 
     /** Dépose un mail dans la boîte d'essai, comme s'il venait d'arriver. */
-    private fun deliver(from: String, subject: String, vararg headers: String, to: String = "valentin@valentinlarge.com") {
+    private fun deliver(
+        from: String,
+        subject: String,
+        vararg headers: String,
+        to: String = "valentin@valentinlarge.com",
+        rcpt: String = "valentin@valentinlarge.com",
+    ) {
         // Un objet accentué voyage encodé, comme dans un vrai mail.
         val title = if (subject.all { it.code < 128 }) subject
         else "=?UTF-8?B?" + Base64.encodeToString(subject.toByteArray(), Base64.NO_WRAP) + "?="
@@ -86,7 +92,7 @@ class E2eTest {
             ).joinToString("\r\n")
         // Le serveur d'essai n'accepte un dépôt de mail que s'il se croit appelé en local.
         val request = Request.Builder()
-            .url("${vm.prefs.server}/cdn-cgi/local/email?from=essai@example.net&to=valentin@valentinlarge.com")
+            .url("${vm.prefs.server}/cdn-cgi/local/email?from=essai@example.net&to=$rcpt")
             .header("Host", "127.0.0.1:8787")
             .post(raw.toByteArray().toRequestBody())
             .build()
@@ -370,6 +376,46 @@ class E2eTest {
         rule.waitUntil(15_000) { rule.onAllNodesWithText("Supprimer définitivement").fetchSemanticsNodes().size == 1 }
         rule.onNodeWithText("Supprimer définitivement").performClick()
         waitText("La corbeille est vide")
+
+        // ---- adresses et règles : une nouvelle adresse, une règle qui archive à l'arrivée
+        rule.onNodeWithText("Réception").performClick()
+        menu("Adresses et règles")
+        waitText("Tes adresses")
+        waitText("adresse principale")
+        rule.onNodeWithTag("alias-nom").performTextInput("contact")
+        rule.onNodeWithText("Ajouter").performClick()
+        waitText("contact@valentinlarge.com")
+        rule.onNodeWithTag("regle-texte").performTextInput("infolettre")
+        rule.onNodeWithText("Ajouter la règle").performClick()
+        waitText("contient « infolettre »")
+        shell("input keyevent 111")
+        shot("17-adresses-et-regles")
+        rule.onNodeWithContentDescription("Retour à la boîte").performClick()
+        waitText("Réception")
+        deliver("Infolettre du lundi <news@infolettre.example>", "Numero 7")
+        deliver("Client <client@example.com>", "Demande de devis", to = "contact@valentinlarge.com", rcpt = "contact@valentinlarge.com")
+        menu("Actualiser")
+        waitText("Demande de devis")
+        assertTrue("le message visé par la règle n'est pas en réception", vm.messages.none { it.subject == "Numero 7" })
+        rule.onNodeWithText("Archives").performClick()
+        waitText("Numero 7")
+        rule.onNodeWithText("Réception").performClick()
+        waitText("Demande de devis")
+
+        // ---- on répond depuis l'adresse qui a reçu le message
+        rule.onNodeWithText("Demande de devis").performClick()
+        rule.waitUntil(30_000) { vm.opened != null }
+        rule.onNodeWithText("Répondre").performClick()
+        waitText("Réponse")
+        assertEquals("contact@valentinlarge.com", vm.draftFrom)
+        waitText("Valentin <contact@valentinlarge.com>")
+        rule.onNodeWithTag("message").performTextInput("Bien reçu, je prépare le devis.")
+        shell("input keyevent 111")
+        shot("18-reponse-depuis-une-autre-adresse")
+        rule.onNodeWithTag("envoyer").performClick()
+        rule.waitUntil(60_000) { vm.screen is Screen.Reader && !vm.sending }
+        settle()
+        backToList()
 
         // ---- déconnexion
         menu("Se déconnecter")

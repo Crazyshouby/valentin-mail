@@ -255,6 +255,10 @@ fun MailboxScreen(vm: MainViewModel, snackbar: SnackbarHostState) {
                                             confirmEmpty = true
                                         })
                                     }
+                                    DropdownMenuItem(text = { Text("Adresses et règles") }, onClick = {
+                                        menu = false
+                                        vm.openSettings()
+                                    })
                                     DropdownMenuItem(text = { Text("Se déconnecter") }, onClick = {
                                         menu = false
                                         vm.logout()
