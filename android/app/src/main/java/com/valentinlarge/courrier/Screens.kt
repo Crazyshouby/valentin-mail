@@ -263,7 +263,11 @@ fun MailboxScreen(vm: MainViewModel, snackbar: SnackbarHostState) {
                                             confirmEmpty = true
                                         })
                                     }
-                                    DropdownMenuItem(text = { Text("Adresses et règles") }, onClick = {
+                                    DropdownMenuItem(text = { Text("Pièces jointes") }, onClick = {
+                                        menu = false
+                                        vm.openGallery()
+                                    })
+                                    DropdownMenuItem(text = { Text("Réglages") }, onClick = {
                                         menu = false
                                         vm.openSettings()
                                     })
@@ -278,7 +282,7 @@ fun MailboxScreen(vm: MainViewModel, snackbar: SnackbarHostState) {
                     )
                 }
                 AirmailStripe()
-                if (labelIdOf(vm.folder) != null) FolderBanner(vm, onFolders = { folders = true }) else FolderTabs(vm)
+                if (isCrossView(vm.folder)) FolderBanner(vm, onFolders = { folders = true }) else FolderTabs(vm)
                 if (searching && !isDrafts && !selecting) {
                     OutlinedTextField(
                         value = vm.query,
@@ -477,10 +481,13 @@ private fun FolderTabs(vm: MainViewModel) {
     }
 }
 
-/** À la place des onglets quand la liste montre un dossier personnel : son nom, et de quoi revenir à la réception. */
+/** À la place des onglets quand la liste montre un dossier personnel ou une boîte d'origine : son nom, et de quoi revenir à la réception. */
 @Composable
 private fun FolderBanner(vm: MainViewModel, onFolders: () -> Unit) {
+    val address = boxOf(vm.folder)
     val label = vm.currentLabel
+    val name = address ?: label?.name ?: "…"
+    val unread = if (address != null) vm.currentBox?.unread ?: 0 else label?.unread ?: 0
     Column {
         Row(
             Modifier.fillMaxWidth().background(BlueWash).height(48.dp),
@@ -490,22 +497,25 @@ private fun FolderBanner(vm: MainViewModel, onFolders: () -> Unit) {
                 Modifier.weight(1f).fillMaxHeight().clickable(onClick = onFolders).testTag("bandeau-dossier").padding(start = 16.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text("Dossier", style = MaterialTheme.typography.bodySmall, color = Muted)
+                Text(if (address != null) "Boîte" else "Dossier", style = MaterialTheme.typography.bodySmall, color = Muted)
                 Spacer(Modifier.width(8.dp))
                 Text(
-                    label?.name ?: "…",
+                    name,
                     modifier = Modifier.weight(1f, fill = false),
                     fontWeight = FontWeight.Bold,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
-                if (label != null && label.unread > 0) {
+                if (unread > 0) {
                     Spacer(Modifier.width(8.dp))
-                    Badge(containerColor = Blue, contentColor = OnBlue) { Text(label.unread.toString()) }
+                    Badge(containerColor = Blue, contentColor = OnBlue) { Text(unread.toString()) }
                 }
             }
             IconButton(onClick = { vm.selectFolder("inbox") }) {
-                Icon(Icons.Filled.Close, contentDescription = "Fermer le dossier et revenir à la réception")
+                Icon(
+                    Icons.Filled.Close,
+                    contentDescription = if (address != null) "Fermer la boîte et revenir à la réception" else "Fermer le dossier et revenir à la réception",
+                )
             }
         }
         HorizontalDivider(color = Line)

@@ -2,6 +2,7 @@ package com.valentinlarge.courrier
 
 import android.app.Application
 import android.net.Uri
+import android.os.SystemClock
 import android.provider.OpenableColumns
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -28,6 +29,7 @@ sealed interface Screen {
     data class Reader(val id: String) : Screen
     data object Compose : Screen
     data object Settings : Screen
+    data object Gallery : Screen
 }
 
 /** Un fichier choisi pour être joint au message en cours de rédaction. */
@@ -63,6 +65,52 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     var screen by mutableStateOf<Screen>(if (repo.prefs.token != null) Screen.Mailbox else Screen.Login)
         private set
+
+    // ---- verrou
+    var lockEnabled by mutableStateOf(repo.prefs.lockEnabled)
+        private set
+
+    /** Vrai tant que le téléphone n'a pas reconnu son propriétaire : l'écran de verrou cache tout le reste. */
+    var locked by mutableStateOf(false)
+        private set
+    private var leftAt = 0L
+
+    /** Faut-il verrouiller ? Seulement si c'est demandé, qu'une boîte est ouverte, et que le téléphone sait vérifier. */
+    private fun mustLock(): Boolean {
+        if (!repo.prefs.lockEnabled || repo.prefs.token == null) return false
+        if (Lock.state(app) != Lock.State.Ready) {
+            // Le téléphone n'a plus ni empreinte ni code : le verrou n'aurait plus de clé. Pour retirer
+            // ceux-ci, il a fallu les connaître ; on rouvre donc l'appli plutôt que de l'enfermer.
+            repo.prefs.lockEnabled = false
+            lockEnabled = false
+            return false
+        }
+        return true
+    }
+
+    fun unlock() {
+        locked = false
+    }
+
+    /** Active ou coupe le verrou ; l'écran des réglages a déjà fait vérifier l'identité par le téléphone. */
+    fun setLock(enabled: Boolean) {
+        repo.prefs.lockEnabled = enabled
+        lockEnabled = enabled
+        notice = if (enabled) "Verrou activé : l'appli demandera l'empreinte à l'ouverture." else "Verrou désactivé."
+    }
+
+    /** L'appli quitte l'écran. */
+    fun wentAway() {
+        leftAt = SystemClock.elapsedRealtime()
+    }
+
+    /** L'appli revient à l'écran : elle se verrouille si elle l'a quitté depuis trop longtemps. */
+    fun cameBack() {
+        val since = leftAt
+        leftAt = 0L
+        if (repo.prefs.token != null) Push.listener = pushListener
+        if (!locked && since != 0L && SystemClock.elapsedRealtime() - since >= Lock.graceMs && mustLock()) locked = true
+    }
 
     /** Message bref affiché en bas de l'écran. */
     var notice by mutableStateOf<String?>(null)
@@ -187,6 +235,43 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (labelIdOf(folder) == label.id) selectFolder("inbox")
     }
 
+    // ---- boîtes d'origine
+    var boxes by mutableStateOf<List<MailBox>>(emptyList())
+        private set
+
+    /** La boîte d'origine que la liste affiche, s'il y en a une. */
+    val currentBox: MailBox? get() = boxOf(folder)?.let { address -> boxes.firstOrNull { it.address == address } }
+
+    fun loadBoxes() {
+        viewModelScope.launch {
+            try {
+                boxes = repo.api.boxes()
+            } catch (e: OfflineException) {
+                // Sans réseau, on garde les boîtes déjà connues.
+            } catch (e: Exception) {
+                handle(e)
+            }
+        }
+    }
+
+    // ---- appareils connectés
+    var sessions by mutableStateOf<List<DeviceSession>>(emptyList())
+        private set
+
+    fun closeSession(session: DeviceSession) = settings {
+        repo.api.closeSession(session.id)
+        notice = "« ${session.name} » est déconnecté."
+    }
+
+    fun closeOtherSessions() = settings {
+        val closed = repo.api.closeOtherSessions()
+        notice = when (closed) {
+            0 -> "Aucun autre appareil n'était connecté."
+            1 -> "1 appareil déconnecté."
+            else -> "$closed appareils déconnectés."
+        }
+    }
+
     // ---- adresses et règles
     var aliasPage by mutableStateOf<AliasPage?>(null)
         private set
@@ -233,6 +318,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 change()
                 aliasPage = repo.api.aliases()
                 rules = repo.api.rules()
+                sessions = repo.api.sessions()
                 repo.api.me()
                 showAccount()
             } catch (e: Exception) {
@@ -335,18 +421,62 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         private set
     private var composeReturn: Screen = Screen.Mailbox
 
+    /** L'écran où revenir en quittant la lecture : la liste, ou la galerie des pièces jointes. */
+    private var readerReturn: Screen = Screen.Mailbox
+
+    // ---- messages confiés par une autre appli
+    /** Vrai quand l'appli n'a été ouverte que pour écrire un message : elle se referme une fois celui-ci parti ou rangé. */
+    private var exitAfterCompose = false
+
+    /** Le mot de la fin (parfois vide) : dès qu'il existe, l'écran se referme et rend la main à l'appli d'où l'on vient. */
+    var farewell by mutableStateOf<String?>(null)
+        private set
+
+    /** Ce qu'une autre appli a confié alors que la boîte n'était pas ouverte : repris après la connexion. */
+    private var pendingShare: Shared? = null
+
+    // ---- galerie des pièces jointes
+    var gallery by mutableStateOf<List<Attachment>>(emptyList())
+        private set
+    var galleryKind by mutableStateOf("")
+        private set
+    var galleryQuery by mutableStateOf("")
+        private set
+    var galleryLoading by mutableStateOf(false)
+        private set
+    var galleryLoadingMore by mutableStateOf(false)
+        private set
+    var galleryMore by mutableStateOf(false)
+        private set
+
+    /** Nombre de messages dont les pièces jointes n'ont pas encore été relevées par le serveur. */
+    var galleryPending by mutableStateOf(0)
+        private set
+    var galleryError by mutableStateOf<String?>(null)
+        private set
+
+    /** Pourquoi l'inventaire s'est interrompu, quand ce n'est pas fini (quota du jour atteint). */
+    var galleryPaused by mutableStateOf<String?>(null)
+        private set
+    private var galleryJob: Job? = null
+    private var scanJob: Job? = null
+
+    // Un signal arrivé pendant que la boîte est à l'écran la met à jour sans attendre.
+    private val pushListener: () -> Unit = { if (screen == Screen.Mailbox && folder == "inbox") refresh() }
+
     init {
+        locked = mustLock()
         if (repo.prefs.token != null) startMailbox()
     }
 
     private fun startMailbox() {
         Sync.schedule(app)
         Push.register(app)
-        // Un signal arrivé pendant que la boîte est à l'écran la met à jour sans attendre.
-        Push.listener = { if (screen == Screen.Mailbox && folder == "inbox") refresh() }
+        Push.listener = pushListener
         showLocal()
         refresh()
         loadLabels()
+        loadBoxes()
         viewModelScope.launch {
             try {
                 repo.api.me()
@@ -373,7 +503,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             Sync.cancel(app)
             messages = emptyList()
             opened = null
-            loginError = "Ta session a expiré. Reconnecte-toi."
+            locked = false
+            loginError = "Ta session a expiré, ou cet appareil a été déconnecté. Reconnecte-toi."
             screen = Screen.Login
         }
     }
@@ -394,6 +525,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 query = ""
                 screen = Screen.Mailbox
                 startMailbox()
+                // Un message confié par une autre appli attendait que la boîte soit ouverte.
+                pendingShare?.let {
+                    pendingShare = null
+                    applyShare(it)
+                }
             } catch (e: Exception) {
                 loginRefused = e is ApiException && e.status == 401
                 loginError = when {
@@ -406,19 +542,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     override fun onCleared() {
-        Push.listener = null
+        if (Push.listener === pushListener) Push.listener = null
         super.onCleared()
     }
 
     fun logout() {
         viewModelScope.launch {
             Push.forget(app)
-            repo.logout()
+            // Le serveur ferme aussi la session : le jeton gardé par ce téléphone ne vaut plus rien.
+            repo.logout(remote = true)
             Sync.cancel(app)
+            galleryJob?.cancel()
+            scanJob?.cancel()
             messages = emptyList()
             labels = emptyList()
+            boxes = emptyList()
+            sessions = emptyList()
+            gallery = emptyList()
             opened = null
             unread = 0
+            locked = false
             loginError = null
             screen = Screen.Login
         }
@@ -483,8 +626,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         listJob?.cancel()
         val target = folder
         val text = query
-        // Les compteurs d'un dossier personnel bougent avec son contenu.
+        // Les compteurs d'un dossier personnel ou d'une boîte bougent avec leur contenu.
         if (labelIdOf(target) != null) loadLabels()
+        if (boxOf(target) != null) loadBoxes()
         listJob = viewModelScope.launch {
             loading = true
             listError = null
@@ -724,6 +868,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     /** Ouvre une conversation par son dernier message, et marque lus ceux qu'elle regroupe. */
     fun openRow(row: ThreadRow) {
+        readerReturn = Screen.Mailbox
         open(row.item.id)
         val others = messages.filter { it.id in row.ids && it.id != row.item.id && !it.isRead }.map { it.id }
         if (others.isEmpty()) return
@@ -786,6 +931,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun openFromNotification(id: String) {
         if (repo.prefs.token == null) return
         if (folder != "inbox") selectFolder("inbox")
+        readerReturn = Screen.Mailbox
         open(id)
     }
 
@@ -796,12 +942,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 opened = null
                 readerError = null
                 thread = emptyList()
-                screen = Screen.Mailbox
+                closeReader()
                 showLocal()
             }
             Screen.Compose -> closeComposer()
             Screen.Settings -> screen = Screen.Mailbox
+            Screen.Gallery -> {
+                galleryJob?.cancel()
+                scanJob?.cancel()
+                galleryLoading = false
+                screen = Screen.Mailbox
+            }
             else -> Unit
+        }
+    }
+
+    /** Quitte la lecture pour l'écran d'où le message a été ouvert. */
+    private fun closeReader() {
+        val target = readerReturn
+        readerReturn = Screen.Mailbox
+        screen = target
+        if (target == Screen.Gallery) {
+            // Le message a pu être rangé ou jeté entre-temps : la galerie se remet à jour.
+            if (gallery.size <= GALLERY_PAGE) loadGallery(quiet = true)
+            startScan()
         }
     }
 
@@ -809,7 +973,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         notice = done
         opened = null
         thread = emptyList()
-        screen = Screen.Mailbox
+        closeReader()
         showLocal()
         refresh()
     }
@@ -856,6 +1020,122 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             null
         }
 
+    // -------------------------------------------- galerie des pièces jointes
+
+    fun openGallery() {
+        screen = Screen.Gallery
+        galleryPaused = null
+        loadGallery()
+        startScan()
+    }
+
+    fun filterGallery(kind: String) {
+        if (kind == galleryKind) return
+        galleryKind = kind
+        gallery = emptyList()
+        loadGallery()
+    }
+
+    fun searchGallery(text: String) {
+        galleryQuery = text
+        loadGallery(wait = 350)
+    }
+
+    fun reloadGallery() {
+        loadGallery()
+        startScan()
+    }
+
+    private fun loadGallery(wait: Long = 0, quiet: Boolean = false) {
+        galleryJob?.cancel()
+        val kind = galleryKind
+        val text = galleryQuery
+        galleryJob = viewModelScope.launch {
+            if (wait > 0) delay(wait)
+            if (!quiet) galleryLoading = true
+            galleryError = null
+            try {
+                val page = repo.api.attachments(kind, text)
+                gallery = page.items
+                galleryMore = page.hasMore
+                galleryPending = page.pending
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                galleryError = handle(e)
+            }
+            galleryLoading = false
+        }
+    }
+
+    fun moreGallery() {
+        val last = gallery.lastOrNull() ?: return
+        if (galleryLoadingMore) return
+        val kind = galleryKind
+        val text = galleryQuery
+        galleryLoadingMore = true
+        viewModelScope.launch {
+            try {
+                val page = repo.api.attachments(kind, text, after = last.cursor)
+                if (kind == galleryKind && text == galleryQuery) {
+                    gallery = (gallery + page.items).distinctBy { it.key }
+                    galleryMore = page.hasMore
+                    galleryPending = page.pending
+                }
+            } catch (e: Exception) {
+                notice = handle(e)
+            }
+            galleryLoadingMore = false
+        }
+    }
+
+    /**
+     * Tant que la galerie est à l'écran, fait avancer l'inventaire du serveur : il relève les pièces
+     * jointes des messages qu'il n'a pas encore examinés (ceux d'avant la galerie, ou importés).
+     */
+    private fun startScan() {
+        if (scanJob?.isActive == true) return
+        scanJob = viewModelScope.launch {
+            var passes = 0
+            while (screen == Screen.Gallery) {
+                val remaining = try {
+                    repo.api.scanAttachments()
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: ApiException) {
+                    if (e.status == 429) galleryPaused = "L'inventaire a atteint la limite du jour ; il reprendra demain." else handle(e)
+                    break
+                } catch (e: Exception) {
+                    break
+                }
+                passes++
+                val done = remaining <= 0
+                // La liste se complète au fil de l'inventaire, tant qu'on n'a pas commencé à la faire défiler loin.
+                if ((done && galleryPending > 0) || (!done && passes % 4 == 0)) {
+                    if (gallery.size <= GALLERY_PAGE) loadGallery(quiet = true)
+                }
+                galleryPending = remaining
+                if (done) break
+                delay(250)
+            }
+        }
+    }
+
+    /** Prépare une pièce de la galerie pour l'ouvrir ou l'enregistrer. */
+    suspend fun fetchAttachment(attachment: Attachment): LocalFile? =
+        try {
+            repo.attachmentFile(attachment)
+        } catch (e: Exception) {
+            notice = handle(e)
+            null
+        }
+
+    /** Ouvre le message qui porte une pièce de la galerie ; le retour ramène à la galerie. */
+    fun openFromGallery(attachment: Attachment) {
+        readerReturn = Screen.Gallery
+        open(attachment.messageId)
+    }
+
     // ------------------------------------------------------------ rédaction
 
     private fun hasContent(): Boolean =
@@ -884,13 +1164,62 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (leftover) baseline = ""
     }
 
-    /** Nouveau message pour une adresse touchée dans un mail. */
-    fun composeTo(address: String) {
+    /** Nouveau message pour une adresse touchée dans un mail ; le lien peut aussi proposer un objet ou un texte. */
+    fun composeLink(link: Uri) {
+        val shared = Share.mailto(link) ?: return
         clearDraft()
-        draftTo = address.trim()
-        draftText = signatureBlock()
+        draftTo = shared.to
+        draftCc = shared.cc
+        draftSubject = shared.subject
+        draftText = shared.text + signatureBlock()
         showComposer()
         baseline = ""
+    }
+
+    /**
+     * Une autre appli confie de quoi écrire un message : un texte ou des fichiers partagés, ou une
+     * adresse touchée ailleurs. [exit] : l'appli n'a été ouverte que pour cela.
+     */
+    fun receive(shared: Shared, exit: Boolean) {
+        if (exit) exitAfterCompose = true
+        if (repo.prefs.token == null) {
+            pendingShare = shared
+            return
+        }
+        applyShare(shared)
+    }
+
+    private fun applyShare(shared: Shared) {
+        // Un message déjà commencé n'est pas remplacé : ce qui arrive s'y ajoute.
+        val untouched = !hasContent() || snapshot() == baseline
+        if (untouched) {
+            clearDraft()
+            draftText = signatureBlock()
+        }
+        draftTo = joinAddresses(draftTo, shared.to)
+        draftCc = joinAddresses(draftCc, shared.cc)
+        if (draftSubject.isBlank()) draftSubject = shared.subject
+        if (shared.text.isNotBlank()) {
+            draftText = if (untouched) shared.text + draftText else draftText.trimEnd() + "\n\n" + shared.text
+        }
+        if (screen != Screen.Compose) showComposer()
+        // Ce qui vient d'arriver compte comme écrit : refermer la rédaction le garde en brouillon.
+        baseline = ""
+        if (shared.files.isNotEmpty()) addFiles(shared.files)
+        if (shared.refused > 0) {
+            notice = if (shared.refused == 1) "Un fichier proposé n'a pas pu être joint." else "${shared.refused} fichiers proposés n'ont pas pu être joints."
+        }
+    }
+
+    private fun joinAddresses(current: String, added: String): String = when {
+        added.isBlank() -> current
+        current.isBlank() -> added
+        else -> current.trim().trimEnd(',') + ", " + added
+    }
+
+    /** Quitte la rédaction : retour à l'écran d'avant, ou à l'appli d'où le message a été lancé. */
+    private fun leaveComposer(target: Screen, word: String = "") {
+        if (exitAfterCompose) farewell = word else screen = target
     }
 
     fun openDraft(draft: Draft) {
@@ -977,7 +1306,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val target = composeReturn
         if (snapshot() == baseline) {
             clearDraft()
-            screen = target
+            leaveComposer(target)
             return
         }
         if (!hasContent()) {
@@ -986,20 +1315,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         sending = true
         viewModelScope.launch {
+            var saved = false
             try {
                 val ids = uploadPending()
                 val id = draftId ?: UUID.randomUUID().toString()
                 repo.api.saveDraft(id, draftTo, draftCc, draftSubject, draftText, draftReplyTo, ids)
                 clearDraft()
-                say("Brouillon enregistré.")
+                saved = true
+                if (!exitAfterCompose) say("Brouillon enregistré.")
                 if (folder == "drafts") loadDrafts()
             } catch (e: Exception) {
                 // Rien n'est perdu : le texte reste dans la fenêtre de rédaction.
                 val reason = handle(e)
-                if (reason != null) notice = "Brouillon non enregistré : il reste ouvert dans « Écrire ». $reason"
+                if (reason != null) {
+                    notice = if (exitAfterCompose) "Brouillon non enregistré. $reason" else "Brouillon non enregistré : il reste ouvert dans « Écrire ». $reason"
+                }
             }
             sending = false
-            if (screen == Screen.Compose) screen = target
+            if (screen == Screen.Compose) {
+                // Ouverte seulement pour ce message, l'appli ne se referme que s'il est en lieu sûr.
+                if (!exitAfterCompose) screen = target else if (saved) farewell = "Brouillon enregistré."
+            }
         }
     }
 
@@ -1008,15 +1344,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val uploaded = draftFiles.mapNotNull { it.uploadId }
         val target = composeReturn
         clearDraft()
-        screen = target
+        if (id == null && uploaded.isEmpty()) {
+            leaveComposer(target)
+            return
+        }
+        if (!exitAfterCompose) screen = target
         viewModelScope.launch {
             try {
                 if (id != null) repo.api.deleteDraft(id) else uploaded.forEach { repo.api.deleteUpload(it) }
-                if (id != null) say("Brouillon supprimé.")
+                if (id != null && !exitAfterCompose) say("Brouillon supprimé.")
                 if (folder == "drafts") loadDrafts()
             } catch (e: Exception) {
                 notice = handle(e)
             }
+            // Le ménage sur le serveur est fini : l'appli peut rendre la main.
+            if (exitAfterCompose) farewell = ""
         }
     }
 
@@ -1105,8 +1447,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val ids = uploadPending()
                 val stored = repo.api.send(draftTo, draftCc, draftSubject, draftText, draftReplyTo, ids, draftId, draftFrom.ifBlank { null })
                 clearDraft()
-                notice = if (stored) "Message envoyé." else "Message envoyé, mais sa copie n'a pas pu être rangée dans Envoyés."
-                screen = composeReturn
+                val word = if (stored) "Message envoyé." else "Message envoyé, mais sa copie n'a pas pu être rangée dans Envoyés."
+                if (!exitAfterCompose) notice = word
+                leaveComposer(composeReturn, word)
                 if (folder == "sent" || folder == "drafts") refresh()
             } catch (e: Exception) {
                 sendError = handle(e)
@@ -1155,6 +1498,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 }
+
+/** Taille d'une page de la galerie, telle que le serveur la découpe. */
+private const val GALLERY_PAGE = 50
 
 // ------------------------------------------------------------------- dates
 

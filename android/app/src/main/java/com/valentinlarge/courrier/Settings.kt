@@ -19,6 +19,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -35,6 +36,7 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -46,6 +48,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
@@ -53,12 +56,14 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 
-/** Les adresses du domaine et les règles de tri : tout ce que le serveur fait d'un message à son arrivée. */
+/** Les réglages : adresses du domaine, règles de tri, signature, notifications, verrou et appareils connectés. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(vm: MainViewModel, snackbar: SnackbarHostState) {
     val page = vm.aliasPage
     val domain = page?.domain?.ifBlank { null } ?: vm.address.substringAfter('@')
+    val context = LocalContext.current
+    var closingOthers by remember { mutableStateOf(false) }
 
     Scaffold(
         containerColor = Paper,
@@ -66,7 +71,7 @@ fun SettingsScreen(vm: MainViewModel, snackbar: SnackbarHostState) {
         topBar = {
             Column(Modifier.background(Paper)) {
                 TopAppBar(
-                    title = { Text("Adresses et règles", style = MaterialTheme.typography.titleLarge) },
+                    title = { Text("Réglages", style = MaterialTheme.typography.titleLarge) },
                     navigationIcon = {
                         IconButton(onClick = { vm.back() }) {
                             Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Retour à la boîte")
@@ -283,8 +288,105 @@ fun SettingsScreen(vm: MainViewModel, snackbar: SnackbarHostState) {
                     modifier = Modifier.padding(horizontal = 16.dp),
                 ) { Text(if (vm.pushTesting) "Essai en cours…" else "Tester les notifications") }
             }
+
+            // ------------------------------------------------ verrouillage
+            SectionTitle(
+                "Verrouillage",
+                "L'appli demande ton empreinte, ou à défaut le code du téléphone, avant de montrer le courrier : à l'ouverture, " +
+                    "et quand tu y reviens après plus d'une minute. Les notifications continuent d'afficher l'expéditeur et l'objet.",
+            )
+            Row(
+                Modifier.fillMaxWidth().background(Sheet).padding(start = 16.dp, end = 12.dp, top = 6.dp, bottom = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("Verrouiller l'appli par empreinte", modifier = Modifier.weight(1f))
+                Switch(
+                    checked = vm.lockEnabled,
+                    onCheckedChange = { wanted ->
+                        // Le téléphone vérifie l'identité avant tout changement, dans un sens comme dans l'autre.
+                        val state = Lock.state(context)
+                        if (state == Lock.State.Ready) {
+                            Lock.ask(context, if (wanted) "Activer le verrou de Courrier" else "Désactiver le verrou de Courrier") { ok ->
+                                if (ok) vm.setLock(wanted)
+                            }
+                        } else if (!wanted) {
+                            vm.setLock(false)
+                        } else {
+                            vm.notice = if (state == Lock.State.NothingSet) {
+                                "Enregistre d'abord une empreinte ou un code de déverrouillage dans les réglages du téléphone."
+                            } else {
+                                "Ce téléphone ne sait pas vérifier une empreinte ou un code pour une appli."
+                            }
+                        }
+                    },
+                    modifier = Modifier.testTag("verrou"),
+                )
+            }
+
+            // ------------------------------------------ appareils connectés
+            SectionTitle(
+                "Appareils connectés",
+                "Chaque téléphone ou navigateur où la boîte est ouverte. Un appareil déconnecté doit redonner le mot de passe.",
+            )
+            Column(Modifier.fillMaxWidth().background(Sheet)) {
+                vm.sessions.forEach { session ->
+                    val name = session.name.ifBlank { if (session.kind == "app") "Appli Courrier" else "Navigateur" }
+                    Row(
+                        Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text(name, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            val details = listOfNotNull(
+                                if (session.current) "cet appareil" else null,
+                                if (session.kind == "app") "appli" else "navigateur",
+                                session.place.ifBlank { null },
+                                if (session.current) null else "dernière activité : ${shortDate(session.seen)}",
+                            )
+                            Text(details.joinToString(", "), style = MaterialTheme.typography.bodySmall, color = Muted)
+                        }
+                        if (!session.current) {
+                            TextButton(
+                                onClick = { vm.closeSession(session) },
+                                enabled = !vm.settingsBusy,
+                                modifier = Modifier.testTag("deconnecter-$name"),
+                            ) { Text("Déconnecter", color = Red) }
+                        }
+                    }
+                    HorizontalDivider(color = Line)
+                }
+                if (vm.sessions.isEmpty() && !vm.settingsBusy && vm.settingsError == null) {
+                    Text("Chargement…", modifier = Modifier.padding(16.dp), color = Muted)
+                }
+                OutlinedButton(
+                    onClick = { closingOthers = true },
+                    enabled = !vm.settingsBusy,
+                    modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 12.dp).testTag("deconnecter-les-autres"),
+                ) { Text("Déconnecter tous les autres appareils") }
+                Text(
+                    "Ferme aussi les connexions anciennes qui ne se sont pas encore montrées dans cette liste.",
+                    modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 6.dp, bottom = 14.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Muted,
+                )
+            }
             Spacer(Modifier.height(24.dp))
         }
+    }
+
+    if (closingOthers) {
+        AlertDialog(
+            onDismissRequest = { closingOthers = false },
+            title = { Text("Déconnecter les autres appareils ?") },
+            text = { Text("Seul ce téléphone restera connecté. Les autres, webmail compris, devront redonner le mot de passe.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    closingOthers = false
+                    vm.closeOtherSessions()
+                }) { Text("Déconnecter", color = Red) }
+            },
+            dismissButton = { TextButton(onClick = { closingOthers = false }) { Text("Annuler") } },
+        )
     }
 }
 

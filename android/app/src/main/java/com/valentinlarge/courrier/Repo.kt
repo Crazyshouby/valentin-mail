@@ -226,16 +226,34 @@ class Repo private constructor(context: Context) {
         return LocalFile(remote.name, remote.type, target)
     }
 
+    /** Pièce jointe choisie dans la galerie : téléchargée seule, sans le reste du message. */
+    suspend fun attachmentFile(attachment: Attachment): LocalFile {
+        val target = File(File(pieceDir, "${attachment.messageId}-galerie"), "${attachment.part}-${Mime.safeName(attachment.name)}")
+        if (!target.exists() || target.length() == 0L) api.downloadAttachment(attachment.messageId, attachment.part, target)
+        return LocalFile(attachment.name, attachment.mime, target)
+    }
+
     private fun forget(id: String) {
         rawFile(id).delete()
         File(pieceDir, id).deleteRecursively()
         File(pieceDir, "$id-envoi").deleteRecursively()
+        File(pieceDir, "$id-galerie").deleteRecursively()
     }
 
-    suspend fun logout() = withContext(Dispatchers.IO) {
-        prefs.clearSession()
-        db.clear()
-        rawDir.deleteRecursively()
-        pieceDir.deleteRecursively()
+    /** Efface tout ce que l'appareil garde de la boîte ; [remote] ferme aussi la session sur le serveur. */
+    suspend fun logout(remote: Boolean = false) {
+        if (remote) {
+            try {
+                api.logout()
+            } catch (e: Exception) {
+                // Sans réseau, la session s'éteindra d'elle-même ; elle reste fermable depuis un autre appareil.
+            }
+        }
+        withContext(Dispatchers.IO) {
+            prefs.clearSession()
+            db.clear()
+            rawDir.deleteRecursively()
+            pieceDir.deleteRecursively()
+        }
     }
 }

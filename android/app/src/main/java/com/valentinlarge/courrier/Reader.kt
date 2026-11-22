@@ -193,7 +193,7 @@ fun ReaderScreen(vm: MainViewModel, snackbar: SnackbarHostState) {
                     opened = opened,
                     onLink = { target ->
                         if (target.scheme.equals("mailto", ignoreCase = true)) {
-                            vm.composeTo(target.schemeSpecificPart.orEmpty().substringBefore('?'))
+                            vm.composeLink(target)
                         } else {
                             link = target
                         }

@@ -3,13 +3,17 @@ package com.valentinlarge.courrier
 import android.accessibilityservice.AccessibilityService
 import android.app.Notification
 import android.app.NotificationManager
+import android.content.ContentValues
+import android.content.Intent
 import android.graphics.Bitmap
 import android.net.Uri
+import android.provider.MediaStore
 import android.util.Base64
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.longClick
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
@@ -23,9 +27,11 @@ import androidx.compose.ui.test.performTextReplacement
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import kotlinx.coroutines.runBlocking
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
@@ -33,6 +39,7 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Parcours complet de l'appli contre un vrai serveur lancé sur la machine de test :
@@ -106,6 +113,43 @@ class E2eTest {
         rule.waitForIdle()
     }
 
+    /** Ouvre la boîte depuis un second appareil ; renvoie le jeton qu'il reçoit. */
+    private fun loginElsewhere(password: String, device: String): String {
+        val body = JSONObject().put("password", password).toString().toRequestBody("application/json".toMediaType())
+        val request = Request.Builder()
+            .url("${vm.prefs.server}/api/login")
+            .header("X-Courrier-App", "android")
+            .header("X-Courrier-Device", device)
+            .post(body)
+            .build()
+        return OkHttpClient().newCall(request).execute().use {
+            assertEquals(200, it.code)
+            JSONObject(it.body!!.string()).getString("token")
+        }
+    }
+
+    /** Vrai si le serveur accepte encore ce jeton. */
+    private fun accepted(token: String): Boolean {
+        val request = Request.Builder()
+            .url("${vm.prefs.server}/api/messages")
+            .header("X-Courrier-App", "android")
+            .header("Authorization", "Bearer $token")
+            .build()
+        return OkHttpClient().newCall(request).execute().use { it.code == 200 }
+    }
+
+    /** Un fichier offert par une autre source que l'appli (ici, les téléchargements du téléphone), comme lors d'un vrai partage. */
+    private fun mediaFile(name: String, content: String): Uri {
+        val values = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+            put(MediaStore.MediaColumns.MIME_TYPE, "text/plain")
+        }
+        val resolver = context.contentResolver
+        val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: error("Le téléphone n'a pas accepté le fichier d'essai.")
+        resolver.openOutputStream(uri)!!.use { it.write(content.toByteArray()) }
+        return uri
+    }
+
     private fun closeComposer() {
         rule.onNodeWithContentDescription("Fermer la rédaction").performClick()
     }
@@ -124,6 +168,9 @@ class E2eTest {
         } catch (e: Throwable) {
             runCatching { shot("99-echec") }
             throw e
+        } finally {
+            Lock.stand = null
+            Lock.graceMs = 60_000
         }
     }
 
@@ -450,7 +497,53 @@ class E2eTest {
         rule.waitUntil(30_000) { vm.folder == "inbox" && vm.messages.any { it.subject == "Re: Devis pour l'affiche" } }
         waitText("Réception")
 
-        menu("Adresses et règles")
+        // ---- un lien d'adresse touché ailleurs : Courrier ouvre un message prérempli
+        val link = Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:lea@example.org?cc=marc@example.com&subject=Devis%20%C3%A9t%C3%A9&body=Bonjour%20L%C3%A9a%2C"))
+            .setPackage(context.packageName)
+        rule.activity.startActivity(link)
+        rule.waitUntil(30_000) { vm.screen == Screen.Compose && vm.draftTo == "lea@example.org" }
+        waitText("Nouveau message")
+        assertEquals("marc@example.com", vm.draftCc)
+        assertEquals("Devis été", vm.draftSubject)
+        assertTrue("le texte du lien précède la signature", vm.draftText.startsWith("Bonjour Léa,"))
+        shell("input keyevent 111")
+        shot("16f-lien-adresse")
+        rule.runOnUiThread { vm.discardDraft() }
+        rule.waitUntil(15_000) { vm.screen == Screen.Mailbox }
+
+        // ---- « Partager » depuis une autre appli : le texte et le fichier arrivent dans un nouveau message
+        val sneaky = Share.from(
+            context,
+            Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_STREAM, Uri.fromFile(File(context.filesDir, "captures"))),
+        )
+        assertTrue("un chemin de fichier brut n'est jamais joint", sneaky != null && sneaky.files.isEmpty() && sneaky.refused == 1)
+        val offered = runCatching { mediaFile("partage-essai.txt", "Fichier partagé depuis une autre appli.\n") }.getOrNull()
+        val share = Intent(Intent.ACTION_SEND)
+            .setType("text/plain")
+            .setPackage(context.packageName)
+            .putExtra(Intent.EXTRA_SUBJECT, "Article à lire")
+            .putExtra(Intent.EXTRA_TEXT, "https://example.net/article")
+        if (offered != null) share.putExtra(Intent.EXTRA_STREAM, offered).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        rule.activity.startActivity(share)
+        rule.waitUntil(30_000) { vm.screen == Screen.Compose && vm.draftSubject == "Article à lire" }
+        assertTrue("le texte partagé est dans le message", vm.draftText.startsWith("https://example.net/article"))
+        if (offered != null) {
+            rule.waitUntil(30_000) { vm.draftFiles.size == 1 }
+            waitText("partage-essai")
+        }
+        rule.onNodeWithTag("destinataire").performTextInput("ami@example.com")
+        shell("input keyevent 111")
+        shot("16g-partage")
+        rule.onNodeWithTag("envoyer").performClick()
+        rule.waitUntil(60_000) { vm.screen == Screen.Mailbox && !vm.sending }
+        waitText("Message envoyé")
+        settle()
+
+        // ---- un second appareil ouvre la boîte : il apparaîtra dans les réglages
+        val elsewhere = loginElsewhere(password, "Tablette d'essai")
+        assertTrue("le second appareil est connecté", accepted(elsewhere))
+
+        menu("Réglages")
         waitText("Tes adresses")
         waitText("adresse principale")
         rule.onNodeWithTag("alias-nom").performTextInput("contact")
@@ -478,10 +571,64 @@ class E2eTest {
         rule.onNodeWithText("Enregistrer la signature").performScrollTo().performClick()
         rule.waitUntil(30_000) { vm.signature == "Valentin, essai" && !vm.settingsBusy }
         settle()
+
+        // ---- appareils connectés : ce téléphone et la tablette ; on déconnecte la tablette d'ici
+        rule.waitUntil(30_000) { vm.sessions.size == 2 && vm.sessions[0].current }
+        rule.onNodeWithTag("deconnecter-Tablette d'essai").performScrollTo()
+        waitText("cet appareil")
+        shot("17b-appareils")
+        rule.onNodeWithTag("deconnecter-Tablette d'essai").performClick()
+        rule.waitUntil(30_000) { vm.sessions.size == 1 && !vm.settingsBusy }
+        assertTrue("la tablette déconnectée n'entre plus", !accepted(elsewhere))
+        settle()
+        rule.onNodeWithTag("deconnecter-les-autres").performScrollTo().performClick()
+        waitText("Seul ce téléphone restera connecté")
+        rule.onNodeWithText("Déconnecter").performClick()
+        waitText("Aucun autre appareil")
+        rule.waitUntil(30_000) { !vm.settingsBusy }
+        settle()
+
+        // ---- verrou : le téléphone vérifie l'identité avant de l'activer (ici, un téléphone d'essai qui dit oui ou non)
+        val recognised = AtomicBoolean(true)
+        Lock.stand = { done -> done(recognised.get()) }
+        rule.onNodeWithTag("verrou").performScrollTo().performClick()
+        rule.waitUntil(15_000) { vm.lockEnabled }
+        shot("17c-verrou-active")
+        settle()
         rule.onNodeWithContentDescription("Retour à la boîte").performClick()
         waitText("Réception")
+
+        // ---- de retour après une absence, l'appli ne montre plus rien tant que le téléphone ne reconnaît pas son propriétaire
+        recognised.set(false)
+        Lock.graceMs = 0
+        rule.runOnUiThread {
+            vm.wentAway()
+            vm.cameBack()
+        }
+        rule.waitUntil(15_000) { vm.locked }
+        waitText("La boîte est verrouillée")
+        assertTrue("verrouillée, l'appli ne montre aucun message", rule.onAllNodesWithText("Réception").fetchSemanticsNodes().isEmpty())
+        shot("17d-verrou")
+        rule.onNodeWithTag("deverrouiller").performClick()
+        rule.waitForIdle()
+        assertTrue("un refus du téléphone laisse l'appli verrouillée", vm.locked)
+        recognised.set(true)
+        rule.onNodeWithTag("deverrouiller").performClick()
+        rule.waitUntil(15_000) { !vm.locked }
+        waitText("Réception")
+        Lock.graceMs = 60_000
+        rule.runOnUiThread { vm.setLock(false) }
+        settle()
+
         deliver("Infolettre du lundi <news@infolettre.example>", "Numero 7")
         deliver("Client <client@example.com>", "Demande de devis", to = "contact@valentinlarge.com", rcpt = "contact@valentinlarge.com")
+        // Un message transféré par Gmail dit, dans ses en-têtes, de quelle boîte Gmail il vient.
+        deliver(
+            "Ancien contact <ancien@example.org>",
+            "Suivi par Gmail",
+            "X-Forwarded-To: valentin@valentinlarge.com",
+            "X-Forwarded-For: boite.essai@gmail.example valentin@valentinlarge.com",
+        )
         menu("Actualiser")
         waitText("Demande de devis")
         assertTrue("le message visé par la règle n'est pas en réception", vm.messages.none { it.subject == "Numero 7" })
@@ -490,6 +637,53 @@ class E2eTest {
         waitText("Numero 7")
         rule.onNodeWithText("Réception").performClick()
         waitText("Demande de devis")
+
+        // ---- tri par boîte : l'adresse principale, une autre adresse du domaine, et le compte Gmail d'origine
+        rule.onNodeWithTag("bouton-dossiers").performClick()
+        waitText("Nouveau dossier")
+        rule.waitUntil(30_000) { vm.boxes.size == 3 }
+        rule.onNodeWithTag("boite-boite.essai@gmail.example").performScrollTo()
+        shot("17e-boites")
+        rule.onNodeWithTag("boite-contact@valentinlarge.com").performScrollTo().performClick()
+        rule.waitUntil(30_000) { boxOf(vm.folder) == "contact@valentinlarge.com" && vm.messages.map { it.subject } == listOf("Demande de devis") }
+        rule.onNodeWithTag("bandeau-dossier").assertTextContains("contact@valentinlarge.com")
+        shot("17f-dans-une-boite")
+        rule.onNodeWithTag("bandeau-dossier").performClick()
+        waitText("Nouveau dossier")
+        rule.onNodeWithTag("boite-boite.essai@gmail.example").performScrollTo().performClick()
+        rule.waitUntil(30_000) { boxOf(vm.folder) == "boite.essai@gmail.example" && vm.messages.map { it.subject } == listOf("Suivi par Gmail") }
+        rule.onNodeWithContentDescription("Fermer la boîte et revenir à la réception").performClick()
+        rule.waitUntil(30_000) { vm.folder == "inbox" && vm.messages.any { it.subject == "Demande de devis" } }
+        waitText("Réception")
+
+        // ---- galerie des pièces jointes : reçues et envoyées, sans ouvrir les messages
+        menu("Pièces jointes")
+        rule.waitUntil(30_000) { vm.screen == Screen.Gallery && !vm.galleryLoading && vm.gallery.any { it.name == "essai-piece.txt" } }
+        val facture = vm.gallery.first { it.name == "facture.txt" && !it.outgoing }
+        assertTrue("les pièces envoyées y sont aussi", vm.gallery.any { it.name == "essai-piece.txt" && it.outgoing })
+        waitText("facture.txt")
+        shot("17g-pieces-jointes")
+        // Une pièce se télécharge seule, et l'appli la décode elle-même.
+        assertEquals("Facture 778 : 42,00 EUR", runBlocking { vm.fetchAttachment(facture) }!!.file.readText())
+        val sentPiece = vm.gallery.first { it.name == "essai-piece.txt" }
+        assertEquals(piece.length(), runBlocking { vm.fetchAttachment(sentPiece) }!!.file.length())
+        rule.onNodeWithTag("famille-pdf").performClick()
+        rule.waitUntil(30_000) { vm.galleryKind == "pdf" && !vm.galleryLoading && vm.gallery.isEmpty() }
+        waitText("Aucune pièce jointe ne correspond")
+        rule.onNodeWithTag("famille-tout").performClick()
+        rule.waitUntil(30_000) { !vm.galleryLoading && vm.gallery.isNotEmpty() }
+        rule.onNodeWithTag("recherche-pieces").performTextInput("facture")
+        rule.waitUntil(30_000) { vm.gallery.isNotEmpty() && vm.gallery.all { it.name == "facture.txt" } }
+        shell("input keyevent 111")
+        rule.onAllNodesWithTag("piece-facture.txt")[0].performClick()
+        waitText("Voir le message")
+        shot("17h-piece-choisie")
+        rule.onNodeWithText("Voir le message").performClick()
+        rule.waitUntil(30_000) { vm.screen is Screen.Reader && vm.opened != null }
+        rule.onNodeWithContentDescription("Retour à la liste").performClick()
+        rule.waitUntil(15_000) { vm.screen == Screen.Gallery }
+        rule.onNodeWithContentDescription("Retour à la boîte").performClick()
+        waitText("Réception")
 
         // ---- on répond depuis l'adresse qui a reçu le message
         rule.onNodeWithText("Demande de devis").performClick()
@@ -520,8 +714,10 @@ class E2eTest {
         Thread.sleep(4000)
         waitText("Réception")
 
-        // ---- déconnexion
+        // ---- déconnexion : le serveur ferme aussi la session, le jeton du téléphone ne vaut plus rien
+        val mine = vm.prefs.token!!
         menu("Se déconnecter")
         waitText("Ouvrir la boîte")
+        assertTrue("le jeton de l'appli est refusé après la déconnexion", !accepted(mine))
     }
 }

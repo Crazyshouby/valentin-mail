@@ -4,7 +4,7 @@ import android.content.Intent
 import android.content.res.Configuration
 import android.graphics.Color as AndroidColor
 import android.os.Bundle
-import androidx.activity.ComponentActivity
+import android.widget.Toast
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
@@ -20,8 +20,11 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.fragment.app.FragmentActivity
 
-class MainActivity : ComponentActivity() {
+// Une activité « à fragments » : c'est ce que demande la fenêtre d'empreinte du téléphone.
+class MainActivity : FragmentActivity() {
 
     val viewModel: MainViewModel by viewModels()
 
@@ -33,7 +36,11 @@ class MainActivity : ComponentActivity() {
             navigationBarStyle = SystemBarStyle.auto(AndroidColor.TRANSPARENT, AndroidColor.TRANSPARENT),
         )
         super.onCreate(savedInstanceState)
-        if (savedInstanceState == null) openFromNotification(intent)
+        if (savedInstanceState == null) {
+            openFromNotification(intent)
+            // Ouverte par « Partager » ou par un lien d'adresse : l'appli n'est là que pour ce message.
+            receiveShare(intent, launched = true)
+        }
         setContent {
             CourrierTheme {
                 App(viewModel)
@@ -44,6 +51,25 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         openFromNotification(intent)
+        receiveShare(intent, launched = false)
+    }
+
+    override fun onStart() {
+        super.onStart()
+        viewModel.cameBack()
+    }
+
+    override fun onStop() {
+        viewModel.wentAway()
+        super.onStop()
+    }
+
+    /** Un texte ou des fichiers partagés depuis une autre appli, ou un lien d'adresse touché ailleurs. */
+    private fun receiveShare(intent: Intent?, launched: Boolean) {
+        // Rouverte depuis la liste des applis récentes, l'appli ne rejoue pas un partage déjà traité.
+        if (intent != null && intent.flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY != 0) return
+        val shared = Share.from(this, intent) ?: return
+        viewModel.receive(shared, exit = launched)
     }
 
     private fun openFromNotification(intent: Intent?) {
@@ -71,11 +97,30 @@ fun App(vm: MainViewModel) {
         }
     }
 
+    // Ouverte seulement pour écrire un message, l'appli se referme une fois celui-ci parti ou rangé.
+    val farewell = vm.farewell
+    val context = LocalContext.current
+    LaunchedEffect(farewell) {
+        if (farewell != null) {
+            if (farewell.isNotBlank()) Toast.makeText(context.applicationContext, farewell, Toast.LENGTH_SHORT).show()
+            (context as? MainActivity)?.finish()
+        }
+    }
+
+    // Verrouillée, l'appli ne montre rien d'autre ; le bouton retour la quitte.
+    if (vm.locked) {
+        LockScreen(vm)
+        return
+    }
+
     val screen = vm.screen
     val selecting = screen == Screen.Mailbox && vm.selected.isNotEmpty()
-    // Depuis un dossier personnel, le bouton retour ramène à la réception avant de quitter l'appli.
-    val inFolder = screen == Screen.Mailbox && labelIdOf(vm.folder) != null
-    BackHandler(enabled = screen is Screen.Reader || screen == Screen.Compose || screen == Screen.Settings || selecting || inFolder) {
+    // Depuis un dossier personnel ou une boîte d'origine, le bouton retour ramène à la réception avant de quitter l'appli.
+    val inFolder = screen == Screen.Mailbox && isCrossView(vm.folder)
+    BackHandler(
+        enabled = screen is Screen.Reader || screen == Screen.Compose || screen == Screen.Settings ||
+            screen == Screen.Gallery || selecting || inFolder,
+    ) {
         when {
             selecting -> vm.clearSelection()
             inFolder -> vm.selectFolder("inbox")
@@ -90,6 +135,7 @@ fun App(vm: MainViewModel) {
             is Screen.Reader -> ReaderScreen(vm, snackbar)
             Screen.Compose -> ComposeScreen(vm, snackbar)
             Screen.Settings -> SettingsScreen(vm, snackbar)
+            Screen.Gallery -> GalleryScreen(vm, snackbar)
         }
     }
 }

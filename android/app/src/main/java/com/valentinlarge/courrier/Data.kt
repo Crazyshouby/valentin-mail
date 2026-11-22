@@ -24,11 +24,14 @@ data class MailItem(
     val threadCount: Int = 1,
     /** Dossiers personnels où le message est rangé (leurs identifiants). */
     val labels: List<String> = emptyList(),
+    /** La boîte qui a reçu le message : une adresse du domaine, ou le compte Gmail d'où il vient. */
+    val box: String = "",
 ) {
     val outgoing: Boolean get() = direction == "out"
 
-    /** Vrai si le message figure dans cette vue : un dossier de la boîte, ou un dossier personnel. */
+    /** Vrai si le message figure dans cette vue : un dossier de la boîte, un dossier personnel, ou une boîte d'origine. */
     fun isIn(view: String): Boolean {
+        boxOf(view)?.let { return !outgoing && folder != "trash" && box == it }
         val label = labelIdOf(view) ?: return folder == view
         return folder != "trash" && label in labels
     }
@@ -66,6 +69,63 @@ private const val LABEL_PREFIX = "label:"
 fun labelKey(id: String): String = LABEL_PREFIX + id
 
 fun labelIdOf(view: String): String? = if (view.startsWith(LABEL_PREFIX)) view.substring(LABEL_PREFIX.length) else null
+
+// Troisième sorte de vue : le courrier reçu par une boîte, désignée par « box: » suivi de son adresse.
+private const val BOX_PREFIX = "box:"
+
+fun boxKey(address: String): String = BOX_PREFIX + address
+
+fun boxOf(view: String): String? = if (view.startsWith(BOX_PREFIX)) view.substring(BOX_PREFIX.length) else null
+
+/** Vrai pour une vue qui traverse les dossiers de la boîte : un dossier personnel, ou une boîte d'origine. */
+fun isCrossView(view: String): Boolean = labelIdOf(view) != null || boxOf(view) != null
+
+/** Une boîte d'origine : l'adresse principale, une autre adresse du domaine, ou un compte extérieur (Gmail). */
+data class MailBox(val address: String, val kind: String, val total: Int, val unread: Int)
+
+/** Un appareil ou un navigateur connecté à la boîte. */
+data class DeviceSession(
+    val id: String,
+    val kind: String,
+    val name: String,
+    val place: String,
+    val created: Long,
+    val seen: Long,
+    val current: Boolean,
+)
+
+/** Une pièce jointe de l'inventaire : le fichier, et le message qui la porte. */
+data class Attachment(
+    val messageId: String,
+    val part: Int,
+    val name: String,
+    val mime: String,
+    val kind: String,
+    val size: Long,
+    val date: Long,
+    val subject: String,
+    val fromName: String,
+    val fromAddr: String,
+    val toAddr: String,
+    val outgoing: Boolean,
+) {
+    val key: String get() = "$messageId.$part"
+
+    /** Le repère à donner au serveur pour obtenir les pièces qui suivent celle-ci. */
+    val cursor: String get() = "$date.$messageId.$part"
+}
+
+data class AttachmentPage(val items: List<Attachment>, val hasMore: Boolean, val pending: Int)
+
+/** Les familles de fichiers de la galerie ; la première ne filtre rien. */
+val ATTACHMENT_KINDS = listOf(
+    "" to "Tout",
+    "image" to "Images",
+    "pdf" to "PDF",
+    "doc" to "Documents",
+    "media" to "Audio et vidéo",
+    "other" to "Autres",
+)
 
 /** Une adresse du domaine : elle reçoit du courrier tant qu'elle n'est pas coupée. */
 data class Alias(val address: String, val label: String, val enabled: Boolean, val received: Int)
@@ -111,8 +171,11 @@ val FOLDERS = listOf(
 )
 
 fun folderOf(id: String): Folder =
-    FOLDERS.firstOrNull { it.id == id }
-        ?: if (labelIdOf(id) != null) Folder(id, "Dossier", "Aucun message rangé dans ce dossier.") else FOLDERS[0]
+    FOLDERS.firstOrNull { it.id == id } ?: when {
+        labelIdOf(id) != null -> Folder(id, "Dossier", "Aucun message rangé dans ce dossier.")
+        boxOf(id) != null -> Folder(id, "Boîte", "Aucun message reçu par cette boîte.")
+        else -> FOLDERS[0]
+    }
 
 /** Réglages et session, gardés dans le stockage privé de l'appli. */
 class Prefs(context: Context) {
@@ -173,13 +236,18 @@ class Prefs(context: Context) {
         get() = sp.getBoolean("asked_notifications", false)
         set(value) = sp.edit().putBoolean("asked_notifications", value).apply()
 
+    /** Vrai si l'appli demande l'empreinte (ou le code du téléphone) avant de montrer le courrier. */
+    var lockEnabled: Boolean
+        get() = sp.getBoolean("lock", false)
+        set(value) = sp.edit().putBoolean("lock", value).apply()
+
     fun clearSession() {
         sp.edit().remove("token").remove("from").remove("address").remove("can_send").remove("signature").remove("push_server").remove("push_token").remove("addresses").remove("last_seen").remove("labels").apply()
     }
 }
 
 /** Copie locale des listes de messages, pour la lecture hors connexion. */
-class Db(context: Context) : SQLiteOpenHelper(context, "courrier.db", null, 3) {
+class Db(context: Context) : SQLiteOpenHelper(context, "courrier.db", null, 4) {
 
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL(
@@ -196,7 +264,8 @@ class Db(context: Context) : SQLiteOpenHelper(context, "courrier.db", null, 3) {
                 is_read INTEGER NOT NULL,
                 thread_id TEXT NOT NULL,
                 thread_count INTEGER NOT NULL,
-                labels TEXT NOT NULL DEFAULT ''
+                labels TEXT NOT NULL DEFAULT '',
+                box TEXT NOT NULL DEFAULT ''
             )"""
         )
         db.execSQL("CREATE INDEX idx_messages_folder_date ON messages (folder, date DESC)")
@@ -222,12 +291,14 @@ class Db(context: Context) : SQLiteOpenHelper(context, "courrier.db", null, 3) {
         threadId = getString(10),
         threadCount = getInt(11),
         labels = getString(12).split(',').filter { it.isNotEmpty() },
+        box = getString(13),
     )
 
-    private val columns = "id, folder, direction, from_addr, from_name, to_addr, subject, date, size, is_read, thread_id, thread_count, labels"
+    private val columns = "id, folder, direction, from_addr, from_name, to_addr, subject, date, size, is_read, thread_id, thread_count, labels, box"
 
-    /** Ce qui désigne une vue dans la base : un dossier de la boîte, ou un dossier personnel (hors corbeille). */
+    /** Ce qui désigne une vue dans la base : un dossier de la boîte, un dossier personnel ou une boîte d'origine (hors corbeille). */
     private fun scope(view: String): Pair<String, List<String>> {
+        boxOf(view)?.let { return "box = ? AND direction = 'in' AND folder != 'trash'" to listOf(it) }
         val label = labelIdOf(view) ?: return "folder = ?" to listOf(view)
         return "folder != 'trash' AND (',' || labels || ',') LIKE ?" to listOf("%,$label,%")
     }
@@ -274,6 +345,7 @@ class Db(context: Context) : SQLiteOpenHelper(context, "courrier.db", null, 3) {
         put("thread_id", item.threadId)
         put("thread_count", item.threadCount)
         put("labels", item.labels.joinToString(","))
+        put("box", item.box)
     }
 
     /** Les messages d'une conversation connus de l'appareil, du plus ancien au plus récent. */

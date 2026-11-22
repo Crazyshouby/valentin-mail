@@ -1,5 +1,7 @@
 package com.valentinlarge.courrier
 
+import android.os.Build
+import com.sun.mail.util.DecodingException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl
@@ -20,6 +22,8 @@ import java.io.File
 import java.io.IOException
 import java.io.InputStream
 import java.util.concurrent.TimeUnit
+import javax.mail.MessagingException
+import javax.mail.internet.MimeUtility
 
 /** Le serveur a répondu par une erreur ; [message] est affichable tel quel. */
 class ApiException(val status: Int, message: String) : Exception(message)
@@ -40,6 +44,14 @@ class Api(private val prefs: Prefs) {
 
     private val jsonType: MediaType = "application/json; charset=utf-8".toMediaType()
 
+    /** Le modèle du téléphone, pour qu'on le reconnaisse dans la liste des appareils connectés. */
+    private val device: String = run {
+        val maker = (Build.MANUFACTURER ?: "").trim()
+        val model = (Build.MODEL ?: "").trim()
+        val full = if (model.startsWith(maker, ignoreCase = true)) model else "$maker $model"
+        full.filter { it.code in 32..126 }.trim().replaceFirstChar { it.uppercase() }.take(60)
+    }
+
     private fun base(): HttpUrl =
         prefs.server.toHttpUrlOrNull() ?: throw ApiException(0, "L'adresse du serveur n'est pas valide.")
 
@@ -49,6 +61,7 @@ class Api(private val prefs: Prefs) {
             query.forEach { (k, v) -> addQueryParameter(k, v) }
         }.build()
         val builder = Request.Builder().url(url).header("X-Courrier-App", "android")
+        if (device.isNotBlank()) builder.header("X-Courrier-Device", device)
         prefs.token?.let { builder.header("Authorization", "Bearer $it") }
         return builder
     }
@@ -107,6 +120,9 @@ class Api(private val prefs: Prefs) {
         }
     }
 
+    /** Un texte du serveur ; une valeur absente ou nulle donne une chaîne vide. */
+    private fun JSONObject.text(name: String): String = if (isNull(name)) "" else optString(name)
+
     private fun JSONObject.toItem() = MailItem(
         id = getString("id"),
         folder = optString("folder", "inbox"),
@@ -121,6 +137,7 @@ class Api(private val prefs: Prefs) {
         threadId = optString("thread_id").ifBlank { getString("id") },
         threadCount = maxOf(1, optInt("thread_count", 1)),
         labels = optJSONArray("labels")?.let { a -> (0 until a.length()).map { a.optString(it) }.filter { it.isNotBlank() } } ?: emptyList(),
+        box = text("box"),
     )
 
     private fun JSONArray?.toFiles(): List<RemoteFile> {
@@ -233,9 +250,15 @@ class Api(private val prefs: Prefs) {
     suspend fun list(folder: String, query: String = "", before: Long = 0, after: Long = 0): ListPage =
         withContext(Dispatchers.IO) {
             val params = LinkedHashMap<String, String>()
-            // Un dossier personnel se demande par son identifiant, un dossier de la boîte par son nom.
+            // Un dossier personnel se demande par son identifiant, une boîte d'origine par son adresse,
+            // un dossier de la boîte par son nom.
             val label = labelIdOf(folder)
-            if (label != null) params["label"] = label else params["folder"] = folder
+            val box = boxOf(folder)
+            when {
+                box != null -> params["box"] = box
+                label != null -> params["label"] = label
+                else -> params["folder"] = folder
+            }
             if (query.isNotBlank()) params["q"] = query.trim()
             if (before > 0) params["before"] = before.toString()
             if (after > 0) params["after"] = after.toString()
@@ -279,6 +302,117 @@ class Api(private val prefs: Prefs) {
     suspend fun deleteLabel(id: String) = withContext(Dispatchers.IO) {
         json(request("/api/labels/$id").delete().build())
         Unit
+    }
+
+    /** Les boîtes qui ont reçu du courrier : adresses du domaine et comptes extérieurs. */
+    suspend fun boxes(): List<MailBox> = withContext(Dispatchers.IO) {
+        val array = json(request("/api/boxes").get().build()).optJSONArray("boxes") ?: JSONArray()
+        (0 until array.length()).map { i ->
+            val o = array.getJSONObject(i)
+            MailBox(o.getString("address"), o.optString("kind", "alias"), o.optInt("total"), o.optInt("unread"))
+        }
+    }
+
+    /** Les appareils et navigateurs connectés à la boîte, celui-ci en premier. */
+    suspend fun sessions(): List<DeviceSession> = withContext(Dispatchers.IO) {
+        val array = json(request("/api/sessions").get().build()).optJSONArray("sessions") ?: JSONArray()
+        (0 until array.length()).map { i ->
+            val o = array.getJSONObject(i)
+            DeviceSession(
+                id = o.getString("id"),
+                kind = o.optString("kind", "web"),
+                name = o.text("name"),
+                place = o.text("place"),
+                created = o.optLong("created"),
+                seen = o.optLong("seen"),
+                current = o.optBoolean("current"),
+            )
+        }
+    }
+
+    /** Déconnecte un appareil à distance. */
+    suspend fun closeSession(id: String) = withContext(Dispatchers.IO) {
+        json(request("/api/sessions/$id").delete().build())
+        Unit
+    }
+
+    /** Déconnecte tous les appareils sauf celui-ci ; renvoie leur nombre. */
+    suspend fun closeOtherSessions(): Int = withContext(Dispatchers.IO) {
+        json(request("/api/sessions/others").delete().build()).optInt("closed")
+    }
+
+    /** Ferme la session de cet appareil côté serveur : son jeton ne vaudra plus rien. */
+    suspend fun logout() = withContext(Dispatchers.IO) {
+        json(request("/api/logout").post("{}".toRequestBody(jsonType)).build())
+        Unit
+    }
+
+    /** Une page de l'inventaire des pièces jointes, des plus récentes aux plus anciennes. */
+    suspend fun attachments(kind: String = "", query: String = "", after: String = ""): AttachmentPage =
+        withContext(Dispatchers.IO) {
+            val params = LinkedHashMap<String, String>()
+            if (kind.isNotBlank()) params["kind"] = kind
+            if (query.isNotBlank()) params["q"] = query.trim()
+            if (after.isNotBlank()) params["after"] = after
+            val result = json(request("/api/attachments", params).get().build())
+            val array = result.optJSONArray("attachments") ?: JSONArray()
+            AttachmentPage(
+                items = (0 until array.length()).map { i ->
+                    val o = array.getJSONObject(i)
+                    Attachment(
+                        messageId = o.getString("message_id"),
+                        part = o.optInt("part"),
+                        name = o.text("name").ifBlank { "piece-jointe" },
+                        mime = o.text("mime").ifBlank { "application/octet-stream" },
+                        kind = o.optString("kind", "other"),
+                        size = o.optLong("size"),
+                        date = o.optLong("date"),
+                        subject = o.text("subject"),
+                        fromName = o.text("from_name"),
+                        fromAddr = o.text("from_addr"),
+                        toAddr = o.text("to_addr"),
+                        outgoing = o.optString("direction") == "out",
+                    )
+                },
+                hasMore = result.optBoolean("hasMore"),
+                pending = result.optInt("pending"),
+            )
+        }
+
+    /** Fait avancer l'inventaire des pièces jointes ; renvoie le nombre de messages qu'il reste à examiner. */
+    suspend fun scanAttachments(): Int = withContext(Dispatchers.IO) {
+        json(request("/api/attachments/scan").post("{}".toRequestBody(jsonType)).build()).optInt("remaining")
+    }
+
+    /**
+     * Télécharge une pièce jointe de l'inventaire. Le serveur l'envoie telle qu'elle est écrite dans
+     * le message (le plus souvent en base64) et dit comment : c'est ici qu'elle est décodée.
+     */
+    suspend fun downloadAttachment(messageId: String, part: Int, target: File) = withContext(Dispatchers.IO) {
+        execute(request("/api/messages/$messageId/attachments/$part").get().build()).use { response ->
+            if (!response.isSuccessful) throw failure(response)
+            val encoding = response.header("X-Part-Encoding").orEmpty().trim().lowercase()
+            val temp = File(target.parentFile, target.name + ".part")
+            target.parentFile?.mkdirs()
+            try {
+                val raw = response.body!!.byteStream()
+                val input = if (encoding.isBlank() || encoding == "identity") raw else MimeUtility.decode(raw, encoding)
+                input.use { stream -> temp.outputStream().use { stream.copyTo(it) } }
+            } catch (e: DecodingException) {
+                temp.delete()
+                throw ApiException(0, "Cette pièce jointe est abîmée : ouvre plutôt le message qui la porte.")
+            } catch (e: MessagingException) {
+                temp.delete()
+                throw ApiException(0, "Cette pièce jointe est écrite d'une façon que l'appli ne sait pas lire : ouvre plutôt le message qui la porte.")
+            } catch (e: IOException) {
+                temp.delete()
+                throw OfflineException()
+            }
+            if (!temp.renameTo(target)) {
+                temp.copyTo(target, overwrite = true)
+                temp.delete()
+            }
+        }
     }
 
     /** Une même action sur plusieurs messages : lu ou non lu, changement de dossier, rangement, suppression. */

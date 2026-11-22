@@ -119,6 +119,16 @@ au même serveur : connexion par mot de passe, dossiers et recherche, lecture ho
 messages déjà reçus, réponse avec pièces jointes, notification des nouveaux mails (relève toutes
 les quinze minutes environ).
 
+Elle sait aussi :
+
+- recevoir un **partage** : « Partager » depuis une autre appli (texte, photo, fichiers) ouvre un
+  nouveau message, et une adresse mail touchée dans un navigateur propose Courrier pour écrire ;
+- montrer la **galerie des pièces jointes** (menu ⋮), triée par famille de fichiers, avec recherche ;
+- se **verrouiller par empreinte** (Réglages) : le téléphone vérifie l'empreinte ou son code, à
+  l'ouverture et après plus d'une minute d'absence — l'appli ne voit ni l'une ni l'autre ;
+- lister les **appareils connectés** (Réglages) et les déconnecter à distance ;
+- trier le courrier **par boîte** (bouton ☰) : adresses du domaine et comptes Gmail d'origine.
+
 Chaque envoi sur la branche lance `.github/workflows/android.yml` : compilation, parcours complet
 dans un émulateur contre le serveur lancé en local (`android/ci/e2e.sh`), puis publication d'un
 APK signé dans les *Releases* du dépôt. La clé de signature est rangée chiffrée dans

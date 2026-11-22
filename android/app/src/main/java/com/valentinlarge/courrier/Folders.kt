@@ -60,8 +60,12 @@ fun FoldersSheet(vm: MainViewModel, onClose: () -> Unit) {
     var renaming by remember { mutableStateOf<Label?>(null) }
     var deleting by remember { mutableStateOf<Label?>(null) }
     val current = labelIdOf(vm.folder)
+    val currentBox = boxOf(vm.folder)
 
-    LaunchedEffect(Unit) { vm.loadLabels() }
+    LaunchedEffect(Unit) {
+        vm.loadLabels()
+        vm.loadBoxes()
+    }
 
     ModalBottomSheet(
         onDismissRequest = onClose,
@@ -112,6 +116,32 @@ fun FoldersSheet(vm: MainViewModel, onClose: () -> Unit) {
                 Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(20.dp))
                 Spacer(Modifier.width(8.dp))
                 Text("Nouveau dossier")
+            }
+
+            // Avec une seule boîte, il n'y a rien à trier.
+            if (vm.boxes.size > 1) {
+                HorizontalDivider(color = Line)
+                Text(
+                    "Boîtes",
+                    modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 18.dp),
+                    style = MaterialTheme.typography.titleMedium,
+                )
+                Text(
+                    "Le courrier reçu par chaque adresse, où qu'il soit rangé.",
+                    modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 2.dp, bottom = 10.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Muted,
+                )
+                vm.boxes.forEach { box ->
+                    BoxLine(
+                        box,
+                        selected = box.address == currentBox,
+                        onOpen = {
+                            vm.selectFolder(boxKey(box.address))
+                            onClose()
+                        },
+                    )
+                }
             }
         }
     }
@@ -198,6 +228,41 @@ private fun FolderLine(node: LabelNode, selected: Boolean, onOpen: () -> Unit, o
                 })
             }
         }
+    }
+}
+
+/** Une boîte d'origine : son adresse, ce qu'elle est, ses messages non lus et son total. */
+@Composable
+private fun BoxLine(box: MailBox, selected: Boolean, onOpen: () -> Unit) {
+    val what = when (box.kind) {
+        "main" -> "adresse principale"
+        "outside" -> if (box.address.endsWith("@gmail.com") || box.address.endsWith("@googlemail.com")) "compte Gmail" else "compte extérieur"
+        else -> null
+    }
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .background(if (selected) BlueWash else Color.Transparent)
+            .clickable(onClick = onOpen)
+            .testTag("boite-${box.address}")
+            .padding(start = 20.dp, end = 20.dp, top = 10.dp, bottom = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(
+                box.address,
+                fontWeight = if (selected || box.unread > 0) FontWeight.Bold else FontWeight.Medium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (what != null) Text(what, style = MaterialTheme.typography.bodySmall, color = Muted)
+        }
+        if (box.unread > 0) {
+            Spacer(Modifier.width(10.dp))
+            Badge(containerColor = Blue, contentColor = OnBlue) { Text(box.unread.toString()) }
+        }
+        Spacer(Modifier.width(10.dp))
+        Text(box.total.toString(), style = MaterialTheme.typography.bodySmall, color = Muted)
     }
 }
 
