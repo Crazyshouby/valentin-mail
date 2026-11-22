@@ -39,6 +39,36 @@ export default {
 // ---------------------------------------------------------------- réception
 
 async function receive(message, env) {
+  const headers = message.headers;
+  const from = parseAddress(decodeMimeWords(headers.get("from") || ""));
+  if (!from.address) from.address = (message.from || "").toLowerCase();
+  const subject = decodeMimeWords(headers.get("subject") || "").trim();
+  const recipient = (message.to || "").toLowerCase();
+
+  // Avant de garder quoi que ce soit : l'adresse visée est-elle coupée, une règle s'applique-t-elle ?
+  let alias = null;
+  let rule = null;
+  try {
+    const [found, rules] = await env.DB.batch([
+      env.DB.prepare("SELECT enabled FROM aliases WHERE address = ?1").bind(recipient),
+      env.DB.prepare("SELECT field, value, action FROM rules ORDER BY created"),
+    ]);
+    alias = (found.results || [])[0] || null;
+    rule = matchRule(rules.results || [], { from: `${from.name} ${from.address}`, to: recipient, subject });
+  } catch (err) {
+    console.error("Lecture des adresses et des règles impossible :", err);
+  }
+  if (alias && !alias.enabled) {
+    message.setReject("Cette adresse n'accepte plus de courrier.");
+    return;
+  }
+  if (rule && rule.action === "block") {
+    message.setReject("Message refusé par le destinataire.");
+    return;
+  }
+  const folder = rule && rule.action === "archive" ? "archive" : rule && rule.action === "trash" ? "trash" : "inbox";
+  const read = rule && rule.action === "read" ? 1 : 0;
+
   const id = crypto.randomUUID();
   const key = `raw/${id}.eml`;
   const raw = await new Response(message.raw).arrayBuffer();
@@ -46,11 +76,6 @@ async function receive(message, env) {
   await env.MAIL_BUCKET.put(key, raw, {
     httpMetadata: { contentType: "message/rfc822" },
   });
-
-  const headers = message.headers;
-  const from = parseAddress(decodeMimeWords(headers.get("from") || ""));
-  if (!from.address) from.address = (message.from || "").toLowerCase();
-  const subject = decodeMimeWords(headers.get("subject") || "").trim();
 
   // Une réponse rejoint la conversation du message auquel elle répond.
   let thread = null;
@@ -64,19 +89,21 @@ async function receive(message, env) {
     await env.DB.prepare(
       `INSERT INTO messages
          (id, folder, direction, from_addr, from_name, to_addr, subject, message_id, date, size, is_read, r2_key, thread_id)
-       VALUES (?1, 'inbox', 'in', ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, ?9, ?10)`
+       VALUES (?1, ?11, 'in', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?12, ?9, ?10)`
     )
       .bind(
         id,
         from.address.slice(0, 320),
         from.name.slice(0, 200),
-        (message.to || "").toLowerCase().slice(0, 320),
+        recipient.slice(0, 320),
         subject.slice(0, 500),
         (headers.get("message-id") || "").trim().slice(0, 500) || null,
         Date.now(),
         raw.byteLength,
         key,
-        thread || id
+        thread || id,
+        folder,
+        read
       )
       .run();
   } catch (err) {
@@ -84,6 +111,126 @@ async function receive(message, env) {
     // l'erreur remonter pour que l'expéditeur reçoive un avis d'échec.
     await env.MAIL_BUCKET.delete(key).catch(() => {});
     throw err;
+  }
+
+  // Toute adresse qui reçoit du courrier apparaît dans la liste des adresses, où l'on peut la couper.
+  if (!alias && ADDRESS.test(recipient)) {
+    await env.DB.prepare("INSERT OR IGNORE INTO aliases (address, label, enabled, created) VALUES (?1, '', 1, ?2)")
+      .bind(recipient, Date.now())
+      .run()
+      .catch((err) => console.error("Adresse non enregistrée :", err));
+  }
+}
+
+// ------------------------------------------------------- adresses et règles
+
+const ADDRESS = /^[a-z0-9._+-]{1,64}@[a-z0-9.-]{1,255}$/;
+const RULE_FIELDS = ["from", "to", "subject"];
+const RULE_ACTIONS = ["archive", "trash", "read", "block"];
+const MAX_RULES = 100;
+
+const mainAddress = (env) => parseAddress(env.MAIL_FROM || "").address.toLowerCase();
+const ownDomain = (env) => mainAddress(env).split("@")[1] || "";
+
+// La première règle dont le texte figure dans le champ visé s'applique ; les suivantes sont ignorées.
+function matchRule(rules, fields) {
+  for (const rule of rules) {
+    const needle = String(rule.value || "").trim().toLowerCase();
+    if (needle && String(fields[rule.field] || "").toLowerCase().includes(needle)) return rule;
+  }
+  return null;
+}
+
+async function listAliases(env) {
+  const rows = await env.DB.prepare(
+    `SELECT a.address, a.label, a.enabled,
+            (SELECT COUNT(*) FROM messages m WHERE m.to_addr = a.address AND m.direction = 'in') AS received
+     FROM aliases a ORDER BY a.created`
+  ).all();
+  return json({
+    main: mainAddress(env),
+    domain: ownDomain(env),
+    aliases: (rows.results || []).map((r) => ({
+      address: r.address,
+      label: r.label,
+      enabled: Boolean(r.enabled),
+      received: r.received,
+    })),
+  });
+}
+
+async function saveAlias(rawAddress, request, env) {
+  let address = "";
+  try {
+    address = decodeURIComponent(rawAddress).trim().toLowerCase();
+  } catch {
+    /* adresse mal encodée : refusée juste après */
+  }
+  const domain = ownDomain(env);
+  if (!ADDRESS.test(address) || !domain || !address.endsWith("@" + domain)) {
+    return json({ error: `L'adresse doit se terminer par @${domain} et ne contenir que des lettres, chiffres, points ou tirets.` }, 400);
+  }
+  const body = (await readJson(request)) || {};
+  const existing = await env.DB.prepare("SELECT label, enabled, created FROM aliases WHERE address = ?1").bind(address).first();
+  const enabled = typeof body.enabled === "boolean" ? body.enabled : existing ? Boolean(existing.enabled) : true;
+  if (!enabled && address === mainAddress(env)) {
+    return json({ error: "L'adresse principale ne peut pas être coupée." }, 400);
+  }
+  const label = typeof body.label === "string" ? body.label.replace(/[\r\n]+/g, " ").trim().slice(0, 100) : existing ? existing.label : "";
+  await env.DB.prepare("INSERT OR REPLACE INTO aliases (address, label, enabled, created) VALUES (?1, ?2, ?3, ?4)")
+    .bind(address, label, enabled ? 1 : 0, existing ? existing.created : Date.now())
+    .run();
+  return json({ ok: true, address, label, enabled });
+}
+
+async function deleteAlias(rawAddress, env) {
+  let address = "";
+  try {
+    address = decodeURIComponent(rawAddress).trim().toLowerCase();
+  } catch {
+    /* rien à effacer */
+  }
+  await env.DB.prepare("DELETE FROM aliases WHERE address = ?1").bind(address).run();
+  return json({ ok: true });
+}
+
+async function listRules(env) {
+  const rows = await env.DB.prepare("SELECT id, field, value, action FROM rules ORDER BY created").all();
+  return json({ rules: rows.results || [] });
+}
+
+async function saveRule(id, request, env) {
+  const body = await readJson(request);
+  if (!body) return json({ error: "Requête illisible." }, 400);
+  const value = String(body.value || "").replace(/[\r\n]+/g, " ").trim().slice(0, 200);
+  if (!RULE_FIELDS.includes(body.field) || !RULE_ACTIONS.includes(body.action)) return json({ error: "Règle inconnue." }, 400);
+  if (!value) return json({ error: "Indique le texte à repérer." }, 400);
+  const existing = await env.DB.prepare("SELECT created FROM rules WHERE id = ?1").bind(id).first();
+  if (!existing) {
+    const count = await env.DB.prepare("SELECT COUNT(*) AS n FROM rules").first();
+    if (count && count.n >= MAX_RULES) return json({ error: `Pas plus de ${MAX_RULES} règles.` }, 400);
+  }
+  await env.DB.prepare("INSERT OR REPLACE INTO rules (id, field, value, action, created) VALUES (?1, ?2, ?3, ?4, ?5)")
+    .bind(id, body.field, value, body.action, existing ? existing.created : Date.now())
+    .run();
+  return json({ ok: true });
+}
+
+async function deleteRule(id, env) {
+  await env.DB.prepare("DELETE FROM rules WHERE id = ?1").bind(id).run();
+  return json({ ok: true });
+}
+
+// Les adresses depuis lesquelles on peut écrire : la principale, puis les autres encore actives.
+async function sendingAddresses(env) {
+  const main = mainAddress(env);
+  const domain = ownDomain(env);
+  try {
+    const rows = await env.DB.prepare("SELECT address FROM aliases WHERE enabled = 1 ORDER BY created").all();
+    const others = (rows.results || []).map((r) => r.address).filter((a) => a !== main && a.endsWith("@" + domain));
+    return [main, ...others].filter(Boolean);
+  } catch {
+    return [main].filter(Boolean);
   }
 }
 
@@ -132,6 +279,7 @@ async function route(request, env) {
       authenticated: true,
       from: env.MAIL_FROM || "",
       address: from.address,
+      addresses: await sendingAddresses(env),
       canSend: Boolean(env.RESEND_API_KEY && from.address),
     });
   }
@@ -143,6 +291,20 @@ async function route(request, env) {
   if (path === "/api/trash/empty" && method === "POST") return emptyTrash(env);
   if (path === "/api/messages/batch" && method === "POST") return batchMessages(request, env);
   if (path === "/api/drafts" && method === "GET") return listDrafts(env);
+  if (path === "/api/aliases" && method === "GET") return listAliases(env);
+  if (path === "/api/rules" && method === "GET") return listRules(env);
+
+  const alias = path.match(/^\/api\/aliases\/([^/]{3,400})$/);
+  if (alias) {
+    if (method === "PUT") return saveAlias(alias[1], request, env);
+    if (method === "DELETE") return deleteAlias(alias[1], env);
+  }
+
+  const rule = path.match(/^\/api\/rules\/([0-9a-f-]{36})$/);
+  if (rule) {
+    if (method === "PUT") return saveRule(rule[1], request, env);
+    if (method === "DELETE") return deleteRule(rule[1], env);
+  }
 
   const draft = path.match(/^\/api\/drafts\/([0-9a-f-]{36})$/);
   if (draft) {
@@ -692,8 +854,19 @@ async function sendMessage(request, url, env) {
     if (original) thread = original.thread_id || original.id;
   }
 
+  // Par défaut l'adresse principale ; sinon l'une des autres adresses actives du domaine.
+  let fromAddress = sender.address;
+  const wanted = typeof body.from === "string" ? body.from.trim().toLowerCase() : "";
+  if (wanted && wanted !== sender.address.toLowerCase()) {
+    if (!(await sendingAddresses(env)).includes(wanted)) {
+      return json({ error: "Cette adresse d'expédition ne fait pas partie des tiennes." }, 400);
+    }
+    fromAddress = wanted;
+  }
+  const fromHeader = sender.name ? `${sender.name} <${fromAddress}>` : fromAddress;
+
   const payload = {
-    from: env.MAIL_FROM,
+    from: fromHeader,
     to: to.list,
     subject: subject || "(sans objet)",
     text,
@@ -746,7 +919,7 @@ async function sendMessage(request, url, env) {
   let stored = true;
   try {
     const eml = buildEml({
-      from: env.MAIL_FROM,
+      from: fromHeader,
       to: to.list,
       cc: cc.list,
       subject: payload.subject,
@@ -762,7 +935,7 @@ async function sendMessage(request, url, env) {
          (id, folder, direction, from_addr, from_name, to_addr, subject, message_id, date, size, is_read, r2_key, thread_id)
        VALUES (?1, 'sent', 'out', ?2, ?3, ?4, ?5, NULL, ?6, ?7, 1, ?8, ?9)`
     )
-      .bind(id, sender.address, sender.name, to.list.join(", ").slice(0, 320), payload.subject, now, bytes.byteLength, key, thread || id)
+      .bind(id, fromAddress, sender.name, to.list.join(", ").slice(0, 320), payload.subject, now, bytes.byteLength, key, thread || id)
       .run();
     if (files.length) {
       await env.DB.prepare(`UPDATE uploads SET message_id = ? WHERE id IN (${files.map(() => "?").join(",")})`)
