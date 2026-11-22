@@ -107,9 +107,10 @@ fun ComposeScreen(vm: MainViewModel, snackbar: SnackbarHostState) {
             }
 
             if (vm.from.isNotBlank()) {
-                Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+                Row(Modifier.fillMaxWidth().heightIn(min = 56.dp).padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text("De", modifier = Modifier.width(56.dp), color = Muted)
-                    Text(vm.from, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    // Même retrait que le texte saisi dans les lignes suivantes.
+                    Text(vm.from, modifier = Modifier.padding(start = 16.dp), maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
                 HorizontalDivider(color = Line)
             }

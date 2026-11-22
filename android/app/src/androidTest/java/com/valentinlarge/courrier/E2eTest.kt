@@ -17,6 +17,9 @@ import androidx.compose.ui.test.performTextReplacement
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import kotlinx.coroutines.runBlocking
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
@@ -24,8 +27,6 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
-import java.net.HttpURLConnection
-import java.net.URL
 
 /**
  * Parcours complet de l'appli contre un vrai serveur lancé sur la machine de test :
@@ -168,13 +169,13 @@ class E2eTest {
             "On se voit jeudi à 14 h ? Détails ici : https://example.net/agenda.",
             "",
         ).joinToString("\r\n")
-        val inject = URL("${vm.prefs.server}/cdn-cgi/local/email?from=camille@example.net&to=valentin@valentinlarge.com")
-            .openConnection() as HttpURLConnection
-        inject.requestMethod = "POST"
-        inject.doOutput = true
-        inject.outputStream.use { it.write(raw.toByteArray()) }
-        assertEquals(200, inject.responseCode)
-        inject.disconnect()
+        // Le serveur d'essai n'accepte un dépôt de mail que s'il se croit appelé en local.
+        val inject = Request.Builder()
+            .url("${vm.prefs.server}/cdn-cgi/local/email?from=camille@example.net&to=valentin@valentinlarge.com")
+            .header("Host", "127.0.0.1:8787")
+            .post(raw.toByteArray().toRequestBody())
+            .build()
+        OkHttpClient().newCall(inject).execute().use { assertEquals(200, it.code) }
 
         val fresh = runBlocking { Sync.check(context) }
         assertTrue("au plus un nouveau message à signaler", fresh <= 1)
