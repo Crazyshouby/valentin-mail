@@ -307,7 +307,7 @@ class E2eTest {
         backToList()
 
         // ---- brouillon : un message refermé est gardé, puis repris et envoyé
-        rule.onNodeWithText("Écrire").performClick()
+        rule.onNodeWithContentDescription("Écrire un message").performClick()
         waitText("Nouveau message")
         rule.onNodeWithTag("destinataire").performTextInput("plus-tard@example.com")
         rule.onNodeWithTag("objet").performTextInput("Idée à creuser")

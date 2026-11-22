@@ -290,7 +290,8 @@ fun MailboxScreen(vm: MainViewModel, snackbar: SnackbarHostState) {
             if (!selecting) {
                 ExtendedFloatingActionButton(
                     onClick = { vm.compose() },
-                    icon = { Icon(Icons.Filled.Create, contentDescription = null) },
+                    // Ce bouton ne transmet pas son texte aux lecteurs d'écran : l'icône porte donc son nom.
+                    icon = { Icon(Icons.Filled.Create, contentDescription = "Écrire un message") },
                     text = { Text("Écrire") },
                     containerColor = Blue,
                     contentColor = Color.White,
