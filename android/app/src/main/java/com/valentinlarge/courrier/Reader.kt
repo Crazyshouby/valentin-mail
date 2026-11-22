@@ -99,7 +99,7 @@ fun ReaderScreen(vm: MainViewModel, snackbar: SnackbarHostState) {
     }
 
     Scaffold(
-        containerColor = Color.White,
+        containerColor = Sheet,
         snackbarHost = { SnackbarHost(snackbar) },
         topBar = {
             Column(Modifier.background(Paper)) {
@@ -245,7 +245,9 @@ private fun ColumnScope.Message(
     val context = LocalContext.current
     val id = opened.item.id
     var remote by rememberSaveable(id) { mutableStateOf(false) }
-    val page = remember(opened) { pageFor(opened.mail) }
+    // Le texte brut prend les couleurs du thème ; un message HTML reste sur fond clair.
+    val darkPage = Palette.dark && opened.mail.html.isNullOrBlank()
+    val page = remember(opened, darkPage) { pageFor(opened.mail, darkPage) }
     val hasRemote = remember(opened) { opened.mail.html?.let { REMOTE.containsMatchIn(it) } == true }
     val pieces = remember(opened) {
         opened.mail.attachments.map { Piece(it.name, it.size, it, null) } +
@@ -286,7 +288,7 @@ private fun ColumnScope.Message(
     }
 
     HorizontalDivider(color = Line)
-    MailBody(page, remote, onLink = onLink, modifier = Modifier.fillMaxWidth().weight(1f).testTag("corps"))
+    MailBody(page, remote, darkPage, onLink = onLink, modifier = Modifier.fillMaxWidth().weight(1f).testTag("corps"))
 }
 
 /** Dans une conversation : où l'on en est, et de quoi passer d'un message à l'autre. */
@@ -453,13 +455,19 @@ private fun PieceChip(
 private val REMOTE = Regex("""(?i)(src|background)\s*=\s*["']?\s*https?:|url\(\s*["']?\s*https?:""")
 
 // Aucun script, cadre ni formulaire ne s'exécute dans un message ; le reste n'est que mise en forme par défaut.
-private const val PAGE_HEAD =
-    "<meta http-equiv=\"Content-Security-Policy\" content=\"script-src 'none'; object-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'\">" +
+private fun pageHead(dark: Boolean): String {
+    val ink = if (dark) "#e6eaf2" else "#17223b"
+    val paper = if (dark) "#19202d" else "#fff"
+    val link = if (dark) "#7ba7f7" else "#1d57b8"
+    val line = if (dark) "#2b3546" else "#d8dfea"
+    val muted = if (dark) "#9ba7bd" else "#5a6880"
+    return "<meta http-equiv=\"Content-Security-Policy\" content=\"script-src 'none'; object-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'\">" +
         "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">" +
-        "<style>body{margin:0;padding:14px 16px 40px;font-family:sans-serif;font-size:16px;line-height:1.5;color:#17223b;background:#fff;word-wrap:break-word}" +
-        "img{max-width:100%;height:auto}a{color:#1d57b8}" +
-        "blockquote{margin:8px 0 8px 2px;padding-left:12px;border-left:3px solid #d8dfea;color:#5a6880}" +
+        "<style>body{margin:0;padding:14px 16px 40px;font-family:sans-serif;font-size:16px;line-height:1.5;color:$ink;background:$paper;word-wrap:break-word}" +
+        "img{max-width:100%;height:auto}a{color:$link}" +
+        "blockquote{margin:8px 0 8px 2px;padding-left:12px;border-left:3px solid $line;color:$muted}" +
         "pre.texte{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;margin:0}</style>"
+}
 
 private val DOCTYPE = Regex("(?is)^\\s*<!doctype[^>]*>")
 private val LINK = Regex("""https?://[^\s<>"]+""")
@@ -468,25 +476,28 @@ private fun escape(text: String): String =
     text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;")
 
 /** La page montrée pour un message : son HTML tel quel, ou son texte brut avec des liens cliquables. */
-internal fun pageFor(mail: ParsedMail): String {
+internal fun pageFor(mail: ParsedMail, dark: Boolean = false): String {
     mail.html?.takeIf { it.isNotBlank() }?.let { html ->
+        // Un message HTML est conçu pour un fond clair : il le garde, même quand l'appli est en sombre.
         // Les réglages se glissent après la déclaration de type, pour ne pas changer le rendu prévu par l'expéditeur.
-        val doctype = DOCTYPE.find(html) ?: return PAGE_HEAD + html
-        return html.substring(0, doctype.range.last + 1) + PAGE_HEAD + html.substring(doctype.range.last + 1)
+        val head = pageHead(false)
+        val doctype = DOCTYPE.find(html) ?: return head + html
+        return html.substring(0, doctype.range.last + 1) + head + html.substring(doctype.range.last + 1)
     }
+    val head = pageHead(dark)
     val text = mail.text?.takeIf { it.isNotBlank() }
-        ?: return PAGE_HEAD + "<p style=\"color:#5a6880\">Ce message n'a pas de contenu affichable.</p>"
+        ?: return head + "<p>Ce message n'a pas de contenu affichable.</p>"
     val body = LINK.replace(escape(text.trimEnd())) { match ->
         // La ponctuation qui suit une adresse n'en fait pas partie.
         val url = match.value.trimEnd('.', ',', ';', ':', '!', '?', ')')
         "<a href=\"$url\">$url</a>" + match.value.substring(url.length)
     }
-    return "$PAGE_HEAD<pre class=\"texte\">$body</pre>"
+    return "$head<pre class=\"texte\">$body</pre>"
 }
 
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
-private fun MailBody(page: String, remote: Boolean, onLink: (Uri) -> Unit, modifier: Modifier) {
+private fun MailBody(page: String, remote: Boolean, dark: Boolean, onLink: (Uri) -> Unit, modifier: Modifier) {
     AndroidView(
         // Sans cette découpe, le fond blanc que la vue web peint en attendant sa page
         // déborde et recouvre l'en-tête du message.
@@ -494,7 +505,6 @@ private fun MailBody(page: String, remote: Boolean, onLink: (Uri) -> Unit, modif
         factory = { context ->
             WebView(context).apply {
                 layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
-                setBackgroundColor(android.graphics.Color.WHITE)
                 settings.javaScriptEnabled = false
                 settings.allowFileAccess = false
                 settings.allowContentAccess = false
@@ -523,6 +533,7 @@ private fun MailBody(page: String, remote: Boolean, onLink: (Uri) -> Unit, modif
             val key = page to remote
             if (view.tag != key) {
                 view.tag = key
+                view.setBackgroundColor(if (dark) 0xFF19202D.toInt() else android.graphics.Color.WHITE)
                 view.settings.blockNetworkLoads = !remote
                 view.settings.blockNetworkImage = !remote
                 view.loadDataWithBaseURL(null, page, "text/html", "utf-8", null)

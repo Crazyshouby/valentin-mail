@@ -441,6 +441,19 @@ class E2eTest {
         settle()
         backToList()
 
+        // ---- thème sombre : l'appli suit le réglage du téléphone
+        shell("cmd uimode night yes")
+        Thread.sleep(4000)
+        waitText("Réception")
+        shot("19-theme-sombre")
+        rule.onNodeWithText("Demande de devis").performClick()
+        rule.waitUntil(30_000) { vm.opened != null }
+        shot("20-theme-sombre-message")
+        backToList()
+        shell("cmd uimode night no")
+        Thread.sleep(4000)
+        waitText("Réception")
+
         // ---- déconnexion
         menu("Se déconnecter")
         waitText("Ouvrir la boîte")

@@ -97,7 +97,7 @@ fun SettingsScreen(vm: MainViewModel, snackbar: SnackbarHostState) {
                 "Chaque adresse en @$domain qui reçoit un message apparaît ici. Coupe celle qui attire le spam : " +
                     "elle refusera le courrier, les autres continuent de marcher.",
             )
-            Column(Modifier.fillMaxWidth().background(Color.White)) {
+            Column(Modifier.fillMaxWidth().background(Sheet)) {
                 (page?.aliases ?: emptyList()).forEach { alias ->
                     val main = alias.address == page?.main
                     Row(
@@ -173,7 +173,7 @@ fun SettingsScreen(vm: MainViewModel, snackbar: SnackbarHostState) {
                 "Règles de tri",
                 "À l'arrivée d'un message, la première règle qui correspond s'applique. Les majuscules ne comptent pas.",
             )
-            Column(Modifier.fillMaxWidth().background(Color.White)) {
+            Column(Modifier.fillMaxWidth().background(Sheet)) {
                 vm.rules.forEach { rule ->
                     Row(
                         Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, top = 6.dp, bottom = 6.dp),
@@ -223,7 +223,7 @@ fun SettingsScreen(vm: MainViewModel, snackbar: SnackbarHostState) {
 
             // --------------------------------------------------- signature
             SectionTitle("Signature", "Ajoutée au bas des messages que tu écris, sous l'endroit où tu tapes. Tu peux la retirer d'un message avant l'envoi.")
-            Column(Modifier.fillMaxWidth().background(Color.White).padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Column(Modifier.fillMaxWidth().background(Sheet).padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 var text by rememberSaveable(vm.signature) { mutableStateOf(vm.signature) }
                 OutlinedTextField(
                     value = text,

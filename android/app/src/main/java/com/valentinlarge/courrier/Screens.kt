@@ -130,7 +130,7 @@ fun LoginScreen(vm: MainViewModel) {
             Column(
                 Modifier
                     .fillMaxWidth()
-                    .background(Color.White, RoundedCornerShape(2.dp))
+                    .background(Sheet, RoundedCornerShape(2.dp))
                     .padding(horizontal = 22.dp, vertical = 28.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
@@ -298,7 +298,7 @@ fun MailboxScreen(vm: MainViewModel, snackbar: SnackbarHostState) {
                     icon = { Icon(Icons.Filled.Create, contentDescription = "Écrire un message") },
                     text = { Text("Écrire") },
                     containerColor = Blue,
-                    contentColor = Color.White,
+                    contentColor = OnBlue,
                 )
             }
         },
@@ -434,7 +434,7 @@ private fun FolderTabs(vm: MainViewModel) {
                         Text(folder.label, fontWeight = if (index == selected) FontWeight.Bold else FontWeight.Medium)
                         if (folder.id == "inbox" && vm.unread > 0) {
                             Spacer(Modifier.width(6.dp))
-                            Badge(containerColor = Blue, contentColor = Color.White) { Text(vm.unread.toString()) }
+                            Badge(containerColor = Blue, contentColor = OnBlue) { Text(vm.unread.toString()) }
                         }
                     }
                 },
@@ -508,7 +508,7 @@ private fun SwipeRow(vm: MainViewModel, row: ThreadRow, selecting: Boolean) {
                 if (direction != SwipeToDismissBoxValue.Settled) {
                     Text(
                         if (!archive) "Corbeille" else if (folder == "trash") "Restaurer" else "Archiver",
-                        color = Color.White,
+                        color = OnBlue,
                         fontWeight = FontWeight.SemiBold,
                     )
                 }
@@ -534,7 +534,7 @@ private fun MessageRow(row: ThreadRow, selected: Boolean, onClick: () -> Unit, o
         Row(
             Modifier
                 .fillMaxWidth()
-                .background(if (selected) BlueWash else Color.White)
+                .background(if (selected) BlueWash else Sheet)
                 .combinedClickable(onClick = onClick, onLongClick = onLongClick)
                 .height(IntrinsicSize.Min)
         ) {
@@ -587,7 +587,7 @@ private fun DraftRow(draft: Draft, onClick: () -> Unit) {
         Column(
             Modifier
                 .fillMaxWidth()
-                .background(Color.White)
+                .background(Sheet)
                 .clickable(onClick = onClick)
                 .padding(start = 18.dp, end = 16.dp, top = 11.dp, bottom = 12.dp)
         ) {

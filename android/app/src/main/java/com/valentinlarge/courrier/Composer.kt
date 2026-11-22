@@ -66,7 +66,7 @@ fun ComposeScreen(vm: MainViewModel, snackbar: SnackbarHostState) {
     var confirmDiscard by remember { mutableStateOf(false) }
 
     Scaffold(
-        containerColor = Color.White,
+        containerColor = Sheet,
         snackbarHost = { SnackbarHost(snackbar) },
         topBar = {
             Column(Modifier.background(Paper)) {
