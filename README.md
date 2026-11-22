@@ -105,6 +105,20 @@ APK signé dans les *Releases* du dépôt. La clé de signature est rangée chif
 `android/signing/` ; seule la phrase du secret GitHub `SIGNING_PASSPHRASE` permet de l'ouvrir.
 Ne change pas ce secret : une autre clé empêcherait les mises à jour de s'installer.
 
+### Notifications instantanées (Firebase)
+
+Sans réglage, l'appli relève le courrier toutes les quinze minutes. Pour être prévenu tout de
+suite, il faut un projet Firebase et deux secrets, à saisir soi-même (jamais dans le dépôt) :
+
+- `GOOGLE_SERVICES_JSON`, secret GitHub Actions : le contenu du fichier `google-services.json`
+  de l'appli Android `com.valentinlarge.courrier`. Il est lu à la construction de l'APK publié.
+- `FCM_SERVICE_ACCOUNT`, secret du Worker Cloudflare : le contenu de la clé privée du compte de
+  service (Firebase > Paramètres du projet > Comptes de service > Générer une nouvelle clé privée).
+
+À l'arrivée d'un message en réception, le serveur envoie alors un signal vide à chaque téléphone
+déclaré ; l'appli vient chercher le message elle-même. L'écran « Adresses et règles » indique
+en bas si les notifications sont instantanées ou encore relevées toutes les quinze minutes.
+
 ## Fichiers
 
 | Fichier | Rôle |
