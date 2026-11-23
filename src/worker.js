@@ -25,6 +25,8 @@ const MAX_LABELS = 200;
 // La base gratuite accepte 100 000 écritures par jour, puis refuse tout jusqu'à minuit UTC — y compris
 // le courrier qui arrive. Les travaux de masse (import, indexation) s'arrêtent donc bien avant.
 const DAILY_WRITE_CAP = 60000;
+// L'entretien de fond s'arrête plus tôt : la réception du courrier et un import passent avant lui.
+const BACKGROUND_WRITE_CAP = 40000;
 const IMPORT_MAX_BYTES = 40 * 1024 * 1024;
 const HEAD_BYTES = 128 * 1024;
 const PART_HEAD_BYTES = 16 * 1024;
@@ -38,6 +40,10 @@ const HEAVY_SCAN_BYTES = 4 * 1024 * 1024;
 const SCAN_ATTEMPTS = 3;
 // Ce qui reste à relever : jamais relu (0), ou relecture interrompue (2, 3…) tant qu'il reste des essais.
 const TO_SCAN = `scanned != 1 AND scanned <= ${SCAN_ATTEMPTS}`;
+// Pour l'index de recherche, « indexed » vaut 0 (à faire), 1 (fait), ou -1, -2… après autant d'essais
+// interrompus ; au bout de INDEX_ATTEMPTS essais, le message est laissé de côté.
+const INDEX_ATTEMPTS = 3;
+const TO_INDEX = `indexed <= 0 AND indexed > -${INDEX_ATTEMPTS}`;
 const PART_HEAD_MAX = 256 * 1024; // le plus long début de pièce jointe qu'on puisse demander
 const SESSION_SEEN_MS = 3600 * 1000; // la dernière activité d'un appareil est notée une fois par heure
 const SESSION_CACHE_MS = 60 * 1000;
@@ -65,13 +71,28 @@ export default {
       return json({ error: "Erreur interne du serveur." }, 500);
     }
   },
+
+  // Chaque minute, sans que personne n'ouvre la boîte : le même entretien, pour que le serveur rattrape
+  // seul ce qui reste à indexer et à inventorier (après un import, par exemple).
+  async scheduled(controller, env, ctx) {
+    try {
+      await background(env);
+    } catch (err) {
+      console.error("Entretien de fond impossible :", err);
+    }
+  },
 };
 
 // Petit entretien de fond : le texte de quelques messages entre dans la recherche, puis leurs pièces
-// jointes dans l'inventaire.
+// jointes dans l'inventaire. Quand il ne reste rien à faire, il ne coûte que trois lectures.
 async function upkeep(env) {
-  await indexSome(env, 2);
-  await scanSome(env, 2);
+  await indexSome(env, 2, false);
+  await scanSome(env, 2, false);
+}
+
+async function background(env) {
+  if ((await spent(env)) >= BACKGROUND_WRITE_CAP) return;
+  await upkeep(env);
 }
 
 // ---------------------------------------------------------------- réception
@@ -276,13 +297,26 @@ function readableText(raw, depth = 0) {
 
 const tidyText = (text) => String(text || "").replace(/\s+/g, " ").trim().slice(0, INDEX_CHARS);
 
-// Indexe quelques messages pas encore passés par là ; renvoie combien il en reste.
-async function indexSome(env, limit) {
-  const rows = await env.DB.prepare("SELECT rowid AS n, id, r2_key FROM messages WHERE indexed = 0 ORDER BY date DESC LIMIT ?1")
-    .bind(limit)
-    .all();
+// Indexe quelques messages pas encore passés par là ; renvoie combien il en reste (zéro si [count] est faux :
+// l'entretien de fond n'a pas besoin de ce décompte, qui relit tout ce qui attend).
+async function indexSome(env, limit, count = true) {
+  const pick = "SELECT rowid AS n, id, r2_key FROM messages WHERE ";
+  let rows = (await env.DB.prepare(pick + "indexed = 0 ORDER BY date DESC LIMIT ?1").bind(limit).all()).results || [];
+  // Plus rien de neuf : on reprend, un seul à la fois, un message dont l'indexation a été interrompue.
+  if (!rows.length) {
+    rows = (await env.DB.prepare(pick + `indexed < 0 AND indexed > -${INDEX_ATTEMPTS} LIMIT 1`).all()).results || [];
+  }
+  if (!rows.length) return 0;
+  // L'essai est noté avant la lecture : si le calcul est interrompu (message trop long à lire), ces
+  // messages ne bloquent pas les suivants ; ils seront repris plus tard, seuls, puis laissés de côté.
+  const marks = rows.map((_, i) => "?" + (i + 1)).join(", ");
+  let written = rowsWritten(
+    await env.DB.prepare(`UPDATE messages SET indexed = indexed - 1 WHERE indexed <= 0 AND id IN (${marks})`)
+      .bind(...rows.map((row) => row.id))
+      .run()
+  );
   const statements = [];
-  for (const row of rows.results || []) {
+  for (const row of rows) {
     let text = "";
     try {
       const object = await env.MAIL_BUCKET.get(row.r2_key, { range: { offset: 0, length: INDEX_BYTES } });
@@ -298,9 +332,10 @@ async function indexSome(env, limit) {
       env.DB.prepare("UPDATE messages SET indexed = 1 WHERE id = ?1").bind(row.id)
     );
   }
-  if (!statements.length) return 0;
-  await spend(env, rowsWritten(await env.DB.batch(statements)));
-  const left = await env.DB.prepare("SELECT COUNT(*) AS n FROM messages WHERE indexed = 0").first();
+  written += rowsWritten(await env.DB.batch(statements));
+  await spend(env, written);
+  if (!count) return 0;
+  const left = await env.DB.prepare(`SELECT COUNT(*) AS n FROM messages WHERE ${TO_INDEX}`).first();
   return left ? left.n : 0;
 }
 
@@ -1614,8 +1649,8 @@ function attachmentStatements(env, messageId, date, parts) {
 // Inventaire des messages qui n'y sont pas encore — arrivés avant qu'il existe, ou trop lourds pour être
 // relevés à l'arrivée : pièces jointes, et boîte d'origine quand on ne la connaît pas. Chaque message est
 // relu en entier. Un message lourd, ou une reprise après interruption, se traite seul dans sa passe.
-// Renvoie le nombre de messages qui restent à relire.
-async function scanSome(env, limit) {
+// Renvoie le nombre de messages qui restent à relire (zéro si [count] est faux : décompte non demandé).
+async function scanSome(env, limit, count = true) {
   const rows = await env.DB.prepare(
     `SELECT id, r2_key, size, date, direction, to_addr, box, scanned FROM messages WHERE ${TO_SCAN} ORDER BY scanned, date DESC LIMIT ?1`
   )
@@ -1655,6 +1690,7 @@ async function scanSome(env, limit) {
   }
   if (!done) return 0;
   await spend(env, written);
+  if (!count) return 0;
   const left = await env.DB.prepare(`SELECT COUNT(*) AS n FROM messages WHERE ${TO_SCAN}`).first();
   return left ? left.n : 0;
 }
@@ -1787,7 +1823,7 @@ function rawHead(bytes) {
 async function importStatus(env) {
   const [imported, unindexed] = await env.DB.batch([
     env.DB.prepare("SELECT COUNT(*) AS n FROM messages WHERE import_ref IS NOT NULL AND source IS NOT NULL"),
-    env.DB.prepare(`SELECT COUNT(*) AS n FROM messages WHERE indexed = 0 OR (${TO_SCAN})`),
+    env.DB.prepare(`SELECT COUNT(*) AS n FROM messages WHERE (${TO_INDEX}) OR (${TO_SCAN})`),
     env.DB.prepare("DELETE FROM cache WHERE key LIKE 'writes:%' AND expires < ?1").bind(Date.now()),
   ]);
   return json({

@@ -31,5 +31,9 @@
   // retire les deux barres devant la ligne suivante :
   // "routes": [{ "pattern": "courrier.valentinlarge.com", "custom_domain": true }],
 
+  // Entretien de fond : chaque minute, le serveur indexe et inventorie seul quelques messages en retard
+  // (fonction « scheduled » du Worker). Sans retard à rattraper, un passage ne coûte presque rien.
+  "triggers": { "crons": ["* * * * *"] },
+
   "observability": { "enabled": true }
 }
